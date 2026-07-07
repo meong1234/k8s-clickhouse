@@ -1,0 +1,64 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: clickhouse-operator
+  namespace: clickhouse-operator
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: altinity-clickhouse-operator
+      version: 0.27.1
+      sourceRef:
+        kind: HelmRepository
+        name: altinity-charts
+        namespace: flux-system
+      interval: 15m
+  maxHistory: 2
+  install:
+    # CRDs are managed in the infra layer (kubernetes/infra/crds), not by Helm.
+    crds: Skip
+    remediation:
+      retries: 3
+  upgrade:
+    crds: Skip
+    cleanupOnFail: true
+    remediation:
+      retries: 3
+  uninstall:
+    keepHistory: false
+  values:
+    # Disable the chart's CRD-install hook (it uses bitnami/kubectl, whose free
+    # Docker Hub catalog is deprecated). CRDs are applied declaratively in infra.
+    crdHook:
+      enabled: false
+
+    # Namespaces the operator reconciles. This MUST list the namespace where the
+    # CHI/CHK live ("clickhouse"). An EMPTY include list does NOT mean "all
+    # namespaces" — the operator then watches only its OWN namespace
+    # ("clickhouse-operator"), so a CHK/CHI in any other namespace is silently
+    # never reconciled (no StatefulSet, empty status). We also keep the operator's
+    # own namespace so it still sees its ClickHouseOperatorConfiguration.
+    # (Use [".*"] to force true watch-all.)
+    configs:
+      files:
+        config.yaml:
+          watch:
+            namespaces:
+              include:
+                - clickhouse
+                - clickhouse-operator
+
+    # Operator + metrics-exporter images. Tags default to the chart appVersion
+    # (0.27.1); pinned here explicitly so the pre-loaded local-registry images are used.
+    operator:
+      image:
+        repository: altinity/clickhouse-operator
+        tag: "0.27.1"
+        pullPolicy: IfNotPresent
+    metrics:
+      image:
+        repository: altinity/metrics-exporter
+        tag: "0.27.1"
+        pullPolicy: IfNotPresent

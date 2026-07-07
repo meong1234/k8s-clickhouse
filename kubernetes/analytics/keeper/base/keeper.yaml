@@ -1,0 +1,84 @@
+---
+# ClickHouse Keeper - the coordination service (a faster, C++ ZooKeeper drop-in)
+# that ReplicatedMergeTree tables use to agree on which parts exist and which
+# replica has them.
+#
+# Production best practice: run Keeper STANDALONE (its own pods, this CHK
+# resource) rather than embedded in the ClickHouse server pods, so query load
+# and Keeper's Raft consensus never starve each other. Use an ODD number of
+# nodes for quorum - 3 tolerates the loss of 1 node. Never run 2.
+apiVersion: "clickhouse-keeper.altinity.com/v1"
+kind: "ClickHouseKeeperInstallation"
+metadata:
+  name: clickhouse-keeper
+  namespace: clickhouse
+spec:
+  configuration:
+    clusters:
+      - name: default
+        layout:
+          replicasCount: 3          # 3-node Raft quorum
+    settings:
+      logger/level: "information"
+      listen_host: "0.0.0.0"
+      # Enable the 4-letter-word admin commands (ruok / mntr / stat ...) so the
+      # quorum can be inspected. Fine for local; tighten this list in production.
+      keeper_server/four_letter_word_white_list: "*"
+      keeper_server/coordination_settings/raft_logs_level: "information"
+      keeper_server/coordination_settings/session_timeout_ms: "30000"
+      keeper_server/coordination_settings/operation_timeout_ms: "10000"
+      # Prometheus metrics endpoint (scraped once you add a Prometheus instance).
+      prometheus/endpoint: "/metrics"
+      prometheus/port: "7000"
+      prometheus/metrics: "true"
+      prometheus/events: "true"
+      prometheus/asynchronous_metrics: "true"
+  defaults:
+    templates:
+      podTemplate: keeper-pod
+      dataVolumeClaimTemplate: keeper-data
+  templates:
+    podTemplates:
+      - name: keeper-pod
+        metadata:
+          labels:
+            app: clickhouse-keeper
+          annotations:
+            prometheus.io/port: "7000"
+            prometheus.io/scrape: "true"
+        spec:
+          # Hard anti-affinity: never place two Keeper pods on the same node,
+          # otherwise a single node failure could take down the quorum. This is
+          # why the KinD cluster is created with 3 worker nodes.
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                      - key: "app"
+                        operator: In
+                        values:
+                          - clickhouse-keeper
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+            - name: clickhouse-keeper
+              image: altinity/clickhouse-keeper:26.3.16.10001.altinitystable
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 1Gi
+          securityContext:
+            fsGroup: 101
+    volumeClaimTemplates:
+      # Keeper needs a small but low-latency persistent volume for its Raft log
+      # and snapshots. On KinD this uses the default local-path StorageClass.
+      - name: keeper-data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi

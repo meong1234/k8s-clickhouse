@@ -1,0 +1,29 @@
+# Local (laptop) overlay for ClickHouse.
+#
+# Relax the base's HARD replica anti-affinity to SOFT so both replicas schedule
+# on a small cluster, and shrink resources to fit a laptop's Docker VM. Data is
+# still fully replicated across the 2 replicas (ReplicatedMergeTree) - the only
+# thing lost locally is the "one replica per physical node" guarantee, which the
+# production base manifest keeps.
+- op: replace
+  path: /spec/templates/podTemplates/0/spec/affinity
+  value:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                    - clickhouse
+            topologyKey: kubernetes.io/hostname
+- op: replace
+  path: /spec/templates/podTemplates/0/spec/containers/0/resources
+  value:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1536Mi

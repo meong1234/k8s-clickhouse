@@ -1,0 +1,41 @@
+# k3d cluster definition (k3d SimpleConfig) — the local-dev Kubernetes cluster.
+#
+# Runtime: k3s (k3d = k3s-in-Docker). We pin k8s v1.33 because the flux CLI
+# requires >= 1.33; this k3s line ships containerd 2.2.x, which is well past the
+# containerd 2.0.5 that SEGFAULTs on kind's node images (the reason we moved off
+# kind). Topology: 1 server (control plane) + 3 agents = 3 dedicated worker
+# nodes, one per Keeper quorum member / ClickHouse replica.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: local-dev
+servers: 1
+agents: 3
+image: rancher/k3s:v1.33.13-k3s1
+options:
+  k3s:
+    extraArgs:
+      # Trim the k3s defaults we don't need (keeps the cluster lean).
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      - arg: --disable=servicelb
+        nodeFilters:
+          - server:*
+registries:
+  # Attach the pre-created local registry (see `make registry-create`). Kept
+  # separate from the cluster lifecycle so pushed images survive `make down`.
+  use:
+    - k3d-local-dev-registry:5000
+  # Merged into each node's /etc/rancher/k3s/registries.yaml. Mirrors docker.io
+  # and ghcr.io to the local registry so pre-pushed images are served locally;
+  # k3s always tries the real upstream last, so anything not preloaded still
+  # pulls normally.
+  config: |
+    mirrors:
+      "docker.io":
+        endpoint:
+          - "http://k3d-local-dev-registry:5000"
+      "ghcr.io":
+        endpoint:
+          - "http://k3d-local-dev-registry:5000"

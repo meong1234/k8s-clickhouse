@@ -1,0 +1,58 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: analytics-source
+  namespace: flux-system
+spec:
+  insecure: true
+  interval: 1m
+  provider: generic
+  ref:
+    tag: local
+  url: oci://k3d-local-dev-registry:5000/analytics-sync
+---
+# 1) ClickHouse Keeper quorum (3 nodes) - must exist before ClickHouse so that
+#    ReplicatedMergeTree tables have a coordination service to talk to.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: keeper-chk
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: clickhouse-operator-ks
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./keeper/local
+  prune: true
+  # wait:false - the Altinity CHK custom resource does not expose a kstatus-native
+  # Ready condition, so we rely on dependsOn ordering + the operator's own
+  # reconcile/retry loop rather than blocking on a health check that can't resolve.
+  wait: false
+---
+# 2) ClickHouseInstallation (1 shard x 2 replicas). Depends on the Keeper quorum.
+#    The CHI references the Keeper by name (spec.configuration.zookeeper.keeper);
+#    the operator discovers the keeper endpoints automatically and retries until
+#    they are reachable, so this converges even if Keeper is still starting.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: clickhouse-chi
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: keeper-chk
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./clickhouse/local
+  prune: true
+  wait: false

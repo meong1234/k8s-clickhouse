@@ -1,0 +1,113 @@
+---
+# ClickHouseInstallation (CHI): one cluster, 1 shard x 2 replicas.
+#
+# Because there are 2 replicas per shard, tables created as ReplicatedMergeTree
+# keep a full copy of the data on BOTH pods and stay in sync through Keeper -
+# the standard production High-Availability pattern. The operator auto-generates
+# <remote_servers>, per-pod <macros> ({shard}/{replica}/{cluster}) and the
+# <zookeeper> config, so replicated DDL "just works" (see `make ch-demo`).
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: clickhouse
+  namespace: clickhouse
+spec:
+  defaults:
+    templates:
+      podTemplate: clickhouse-pod
+      dataVolumeClaimTemplate: data
+      logVolumeClaimTemplate: logs
+  configuration:
+    # ---- Wire ClickHouse to the standalone Keeper quorum by NAME ----
+    # The operator discovers the 3 keeper endpoints automatically (no hard-coded
+    # service DNS) and retries until they are reachable.
+    zookeeper:
+      keeper:
+        name: clickhouse-keeper
+        # namespace defaults to this CHI's namespace (clickhouse)
+        # serviceType defaults to "replicas" (one ZK node entry per keeper pod)
+      session_timeout_ms: 30000
+      operation_timeout_ms: 10000
+
+    clusters:
+      - name: default
+        layout:
+          shardsCount: 1
+          replicasCount: 2
+
+    # ---- Users ----
+    # The admin password (as a SHA256 hex) is injected from a Kubernetes Secret
+    # rather than committed in-line. The operator renders it via `from_env`.
+    users:
+      admin/password_sha256_hex:
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-credentials
+            key: admin_password_sha256_hex
+      admin/profile: default
+      admin/quota: default
+      admin/access_management: "1"
+      admin/named_collection_control: "1"
+      admin/networks/ip:
+        - "0.0.0.0/0"
+        - "::/0"
+
+    profiles:
+      default/max_memory_usage: "1500000000"     # ~1.5 GiB, fits the 2Gi pod limit
+      default/load_balancing: "nearest_hostname"
+      default/max_execution_time: "60"
+
+    quotas:
+      default/interval/duration: "3600"
+
+    settings:
+      max_concurrent_queries: "50"
+      max_connections: "512"
+
+  templates:
+    podTemplates:
+      - name: clickhouse-pod
+        metadata:
+          labels:
+            app: clickhouse
+          annotations:
+            prometheus.io/port: "8001"
+            prometheus.io/scrape: "true"
+        spec:
+          # Hard anti-affinity so the two replicas of the shard never share a
+          # node - a node loss then costs at most one replica, not the data.
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                      - key: "app"
+                        operator: In
+                        values:
+                          - clickhouse
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+            - name: clickhouse
+              image: altinity/clickhouse-server:26.3.16.10001.altinitystable
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi
+                limits:
+                  memory: 2Gi
+    volumeClaimTemplates:
+      - name: data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+      - name: logs
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi

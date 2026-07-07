@@ -1,0 +1,22 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# All CustomResourceDefinitions are managed declaratively here in the infra layer
+# (installed before the operator, which depends on infra-ks). This is a
+# deliberate production practice: CRDs are version-pinned and vendored in Git,
+# never left to an in-cluster Helm hook - so the bootstrap has no reconcile-time
+# dependency on an external download, and we avoid the chart's bitnami/kubectl
+# crd-install job (crdHook is disabled in the HelmRelease).
+#
+# Vendored from Altinity/clickhouse-operator @ release-0.27.1. Refresh with:
+#   make crds-vendor OPERATOR_VERSION=0.27.1
+#
+# NOTE on monitoring: ClickHouse/Keeper and the Altinity metrics-exporter expose
+# Prometheus metrics (the CHK/CHI carry prometheus.io scrape annotations). To
+# actually scrape them, install kube-prometheus-stack (which brings its own
+# PodMonitor/ServiceMonitor CRDs) - add it under kubernetes/operators or here.
+resources:
+  - clickhouseinstallations.yaml
+  - clickhouseinstallationtemplates.yaml
+  - clickhousekeeperinstallations.yaml
+  - clickhouseoperatorconfigurations.yaml

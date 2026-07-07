@@ -1,0 +1,29 @@
+# Local (laptop) overlay for the Keeper.
+#
+# The base manifest uses HARD anti-affinity (requiredDuringScheduling), which
+# needs one node per Keeper pod - correct for production, but it leaves pods
+# Pending on a small local cluster. Here we relax it to SOFT (preferred) so all
+# 3 Keeper pods still schedule on 2 workers, and we shrink the resource requests
+# so the whole stack fits comfortably in a laptop's Docker VM.
+- op: replace
+  path: /spec/templates/podTemplates/0/spec/affinity
+  value:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                    - clickhouse-keeper
+            topologyKey: kubernetes.io/hostname
+- op: replace
+  path: /spec/templates/podTemplates/0/spec/containers/0/resources
+  value:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi

@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - target:
+      group: clickhouse-keeper.altinity.com
+      version: v1
+      kind: ClickHouseKeeperInstallation
+      name: clickhouse-keeper
+    path: keeper-patch.yaml

@@ -1,0 +1,11 @@
+---
+# Shared namespace for the whole ClickHouse data plane (Keeper + ClickHouse).
+# Created here because the Keeper layer is deployed first; the ClickHouse layer
+# deploys its resources into this same namespace so the CHI can reference the
+# CHK by name (spec.configuration.zookeeper.keeper defaults to the CHI namespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clickhouse
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled

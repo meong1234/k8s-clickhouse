@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Root of the 'cluster-sync' OCI artifact. The bootstrap Kustomization
+# (flux-system/cluster-sync.yaml) reconciles this with path './', so we point
+# it explicitly at the active environment overlay. The flux-system/ bootstrap
+# manifests are intentionally NOT referenced here - they are applied once by
+# `make fluxcd-oci-setup` and must not be self-managed/pruned by the sync.
+resources:
+  - local
