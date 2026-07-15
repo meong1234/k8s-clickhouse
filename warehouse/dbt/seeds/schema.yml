@@ -1,0 +1,93 @@
+version: 2
+
+# Static dimension seeds (§3). These load into nimbus_raw (they have no +schema
+# config, so generate_schema_name falls back to target.schema) and are treated as
+# static dims by the architecture doc. Column types are pinned so ClickHouse type
+# inference can't surprise us (e.g. mcc as UInt32, is_revenue as String).
+
+seeds:
+  - name: seed_transaction_categories
+    description: >
+      Ledger transaction categories and their revenue treatment. `category_code`
+      joins to raw_ledger_postings.category_code; `revenue_type` classifies the
+      revenue line (interchange | fee | interest | none).
+    config:
+      column_types:
+        category_code: String
+        category: String
+        is_revenue: Bool
+        revenue_type: String
+    columns:
+      - name: category_code
+        description: Primary key — matches raw_ledger_postings.category_code.
+        data_tests: [unique, not_null]
+      - name: category
+        description: Human-readable category label.
+      - name: is_revenue
+        description: Whether postings in this category represent Nimbus revenue.
+      - name: revenue_type
+        description: "One of: interchange, fee, interest, none."
+
+  - name: seed_mcc_codes
+    description: >
+      Merchant Category Codes with their interchange rate in basis points. Joined to
+      card authorizations (and card-settlement postings) to compute interchange
+      revenue in integer bps math.
+    config:
+      column_types:
+        mcc: UInt16
+        merchant_category: String
+        interchange_rate_bps: UInt16
+    columns:
+      - name: mcc
+        description: Primary key — 4-digit Merchant Category Code.
+        data_tests: [unique, not_null]
+      - name: merchant_category
+        description: Human-readable merchant category.
+      - name: interchange_rate_bps
+        description: Interchange rate in basis points (1 bps = 0.01%).
+
+  - name: seed_fee_schedule
+    description: The flat fee amounts Nimbus charges, in integer minor units.
+    config:
+      column_types:
+        fee_type: String
+        amount_minor: Int64
+    columns:
+      - name: fee_type
+        description: Primary key — fee identifier.
+        data_tests: [unique, not_null]
+      - name: amount_minor
+        description: Fee amount in minor units (cents).
+
+  - name: seed_countries
+    description: Country reference — region rollup and local currency.
+    config:
+      column_types:
+        country: String
+        region: String
+        currency: String
+    columns:
+      - name: country
+        description: Primary key — ISO 3166-1 alpha-2 country code.
+        data_tests: [unique, not_null]
+      - name: region
+        description: Region rollup used by the metrics/growth marts.
+      - name: currency
+        description: ISO 4217 currency code for the country.
+
+  - name: seed_risk_tiers
+    description: KYC/risk tiers and their daily spend limits.
+    config:
+      column_types:
+        risk_tier: String
+        description: String
+        daily_limit_minor: Int64
+    columns:
+      - name: risk_tier
+        description: "Primary key — one of: low, medium, high."
+        data_tests: [unique, not_null]
+      - name: description
+        description: Human-readable tier description.
+      - name: daily_limit_minor
+        description: Daily spend limit in minor units (cents).

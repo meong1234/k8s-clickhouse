@@ -1,0 +1,4 @@
+risk_tier,description,daily_limit_minor
+low,Low risk — full limits,500000
+medium,Medium risk — standard limits,200000
+high,High risk — restricted limits,50000

@@ -1,0 +1,11 @@
+category_code,category,is_revenue,revenue_type
+payroll,Payroll Deposit,false,none
+card_settlement,Card Settlement,false,none
+p2p_transfer,P2P Transfer,false,none
+atm_withdrawal,ATM Withdrawal,false,none
+atm_fee,ATM Fee,true,fee
+expedited_transfer_fee,Expedited Transfer Fee,true,fee
+interest_accrual,Interest Accrual,true,interest
+interchange,Card Interchange,true,interchange
+account_transfer,Account Transfer,false,none
+internal_settlement,Internal Settlement,false,none

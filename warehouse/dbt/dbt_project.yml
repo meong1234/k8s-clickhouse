@@ -42,3 +42,10 @@ models:
       +schema: metrics
       +materialized: table
       +engine: ReplicatedMergeTree
+
+# Static dimension seeds. No +schema -> they land in target.schema (nimbus_raw),
+# treated as static dims per the architecture doc. Replicated so they exist on both
+# pods like every other table (column types are pinned in seeds/schema.yml).
+seeds:
+  nimbus:
+    +engine: ReplicatedMergeTree

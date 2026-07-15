@@ -21,3 +21,6 @@
 
 # Warehouse (dbt) host virtualenv (dbt artifacts are ignored in warehouse/dbt/.gitignore)
 /warehouse/.venv/
+
+# Generated synthetic-data CSVs (produced by `make wh-generate`, not source)
+/warehouse/generator/out/

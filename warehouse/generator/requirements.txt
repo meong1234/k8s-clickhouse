@@ -1,0 +1,5 @@
+# The Nimbus generator is intentionally stdlib-only — it runs from a bare `python3`
+# with no venv or install step (see the module docstring for the rationale).
+#
+# There are no runtime dependencies. This file exists so the choice is explicit and
+# so `pip install -r requirements.txt` is a valid (no-op) command.

@@ -27,3 +27,20 @@
       memory: 512Mi
     limits:
       memory: 1536Mi
+
+# Background-merge memory safety (laptop overlay only; base/prod keeps ClickHouse
+# defaults). The operator derives max_server_memory_usage = 0.9 x the 1536Mi limit
+# = ~1.35 GiB server-wide. Bulk-loading the laptop-real bronze (~2M ledger + 10M app
+# events + 1M auths, all PARTITION BY toYYYYMM over 18 months) spawns many background
+# merges; with the default merge_max_block_size=8192 a single merge of the wide
+# LowCardinality rows can want 600+ MiB, and enough of them at once pin RSS at the cap
+# -> MEMORY_LIMIT_EXCEEDED. We make each merge cheap instead of buying RAM: holding
+# 1024 rows at a time (8x fewer) drops per-merge peak memory ~8x. This is the one merge
+# knob with no cross-setting sanity check (reducing background_pool_size would also
+# require lowering the interdependent number_of_free_entries_in_pool_* thresholds or CH
+# refuses to boot). Applies to system *_log tables too (they also merge under load).
+# Paired with the 250k insert blocks in loaders/load_bronze.sh, which keep part counts
+# low, this keeps total merge memory well under the cap without losing correctness.
+- op: add
+  path: /spec/configuration/settings/merge_tree~1merge_max_block_size
+  value: "1024"

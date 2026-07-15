@@ -1,0 +1,6 @@
+fee_type,amount_minor
+atm_fee,300
+expedited_transfer,1500
+card_replacement,500
+foreign_transaction,250
+overdraft,3500

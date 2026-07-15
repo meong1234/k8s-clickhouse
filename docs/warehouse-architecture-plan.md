@@ -13,8 +13,8 @@
 
 | Phase | Goal | Key deliverable | Depends on |
 | --- | --- | --- | --- |
-| [P0](#p0--dbt-user--dbt-scaffold--replication-spike) | dbt can build a replicated table as a scoped user | `dbt` user + `warehouse/dbt` scaffold + validated `ON CLUSTER` behavior | running cluster (`make up`) |
-| [P1](#p1--bronze-ddl--synthetic-data) | Bronze populated with laptop-real Nimbus data | DDL + Python generator + native loaders + seeds | P0 |
+| ✅ [P0](#p0--dbt-user--dbt-scaffold--replication-spike) | dbt can build a replicated table as a scoped user | `dbt` user + `warehouse/dbt` scaffold + validated `ON CLUSTER` behavior | running cluster (`make up`) |
+| ✅ [P1](#p1--bronze-ddl--synthetic-data) | Bronze populated with laptop-real Nimbus data | DDL + Python generator + native loaders + seeds | P0 |
 | [P2](#p2--vertical-slice) | One metric flows bronze→metrics end-to-end | ledger → daily balance → finance metric slice | P1 |
 | [P3](#p3--in-cluster-runtime-v1-contract) | dbt runs **in-cluster** under Flux (v1 contract) | `dbt-runner` image + Job/CronJob + Flux wiring | P2 |
 | [P4](#p4--full-silver) | All staging + intermediate models | dedup, SCD2, funnel, DAU, interchange | P3 |
@@ -55,87 +55,84 @@ engines (the one open unknown flagged in §9). Everything later builds on the se
 
 **A. Scoped `dbt` user (GitOps)**
 
-- [ ] Generate a password hash: `make ch-password PASSWORD=dbt123` (dev-only default, documented).
-- [ ] Create `kubernetes/analytics/clickhouse/local/dbt-credentials.yaml` — Secret
+- [x] Generate a password hash: `make ch-password PASSWORD=dbt123` (dev-only default, documented).
+- [x] Create `kubernetes/analytics/clickhouse/local/dbt-credentials.yaml` — Secret
       `dbt-credentials` in ns `clickhouse` with key `dbt_password_sha256_hex`, mirroring
       `clickhouse-credentials.yaml` (including the rotation comment).
-- [ ] Add the secret to `kubernetes/analytics/clickhouse/local/kustomization.yaml` resources.
-- [ ] Add the user to the CHI **base** (`kubernetes/analytics/clickhouse/base/clickhouse.yaml`,
-      `spec.configuration.users`):
-      ```yaml
-      dbt/password_sha256_hex:
-        valueFrom:
-          secretKeyRef: { name: dbt-credentials, key: dbt_password_sha256_hex }
-      dbt/profile: default
-      dbt/quota: default
-      dbt/networks/ip: ["0.0.0.0/0", "::/0"]
-      ```
-- [ ] **Research item — grants.** The operator's `users:` block writes `users.xml`-style config,
-      which does **not** carry SQL `GRANT`s. Validate in order:
-      1. XML-config scoping: `dbt/allow_databases/database: [nimbus_raw, nimbus_staging, …]`
-         (config-level DB allow-list — if operator 0.27.1 renders it, this is the GitOps-native win);
-      2. fallback: a one-shot idempotent SQL bootstrap (run as `admin`) that creates the
-         `nimbus_*` databases `ON CLUSTER` and grants
-         `CREATE, DROP, SELECT, INSERT, ALTER, TRUNCATE, OPTIMIZE ON nimbus_*.*` +
-         `SELECT ON system.*` to `dbt` — shipped as `warehouse/loaders/01_bootstrap_dbt_user.sql`
-         and wired into `make wh-bronze`. (Note: SQL GRANTs on an XML-defined user require no
-         `access_management` for `dbt` itself; `admin` already has it.)
-      Record the outcome as a comment in the CHI manifest.
-- [ ] Deploy: `make fluxcd-push-artifacts`, wait for reconcile, verify
-      `SELECT currentUser()` as `dbt` on pod 0.
+- [x] Add the secret to `kubernetes/analytics/clickhouse/local/kustomization.yaml` resources.
+- [x] Add the user to the CHI **base** (`kubernetes/analytics/clickhouse/base/clickhouse.yaml`,
+      `spec.configuration.users`): `dbt/password_sha256_hex` (via `secretKeyRef`),
+      `dbt/profile: default`, `dbt/quota: default`, `dbt/networks/ip`.
+- [x] **Research item — grants. RESOLVED.** Both planned options failed and a third,
+      still-GitOps-native mechanism was used instead (full write-up in `warehouse/README.md`):
+      1. `allow_databases` (option 1) is **insufficient** — with `cluster:` set, dbt introspects
+         via `clusterAllReplicas()`, needing the **global** `REMOTE` privilege (and `CLUSTER` to
+         run `ON CLUSTER` DDL); a DB allow-list can't grant global privileges.
+      2. The SQL-bootstrap fallback (option 2) is **impossible** for this user — an
+         operator-defined user lives in read-only `users_xml` storage, so `GRANT … TO dbt` fails
+         with `ACCESS_STORAGE_READONLY`. (No `warehouse/loaders/01_bootstrap_dbt_user.sql` shipped.)
+      3. **Used:** a config-native `<grants>` block in the CHI (`dbt/grants/query: […]`) — the
+         operator renders it into `users.xml`. Grants: `REMOTE`, `CLUSTER`, `SELECT ON system.*`,
+         and `ALL ON nimbus_*.*` (per-database → `demo` etc. denied). Outcome recorded as a
+         comment in the CHI manifest.
+- [x] Deploy: `make fluxcd-push-artifacts`, wait for reconcile, verify
+      `SELECT currentUser()` as `dbt` on pod 0 (and pod 1).
 
 **B. dbt project scaffold**
 
-- [ ] `warehouse/dbt/dbt_project.yml` — project `nimbus`; model path config mapping
+- [x] `warehouse/dbt/dbt_project.yml` — project `nimbus`; model path config mapping
       `staging/ → schema: staging`, `intermediate/ → intermediate`, `marts/ → marts`,
       `metrics/ → metrics`; `+materialized` defaults (views for staging/intermediate,
-      tables for marts/metrics).
-- [ ] `warehouse/dbt/profiles/profiles.yml` — target `dev`:
+      tables for marts/metrics). Also `+engine: ReplicatedMergeTree` on the table layers
+      (see D).
+- [x] `warehouse/dbt/profiles/profiles.yml` — target `dev`:
       `host: "{{ env_var('NIMBUS_CH_HOST', 'localhost') }}"`, `port: 8123`, `user: dbt`,
       `password: "{{ env_var('NIMBUS_CH_PASSWORD', 'dbt123') }}"`,
       `schema: nimbus_raw` (base schema; real placement via macro below),
       `cluster: "{{ env_var('NIMBUS_CH_CLUSTER', 'default') }}"`, plus
       `cluster_mode`/engine defaults as determined by the spike (D).
       Same profile works host-side and in-cluster — only `NIMBUS_CH_HOST` differs.
-- [ ] `warehouse/dbt/macros/generate_schema_name.sql` — override so `+schema: marts` →
+- [x] `warehouse/dbt/macros/generate_schema_name.sql` — override so `+schema: marts` →
       database `nimbus_marts` (prefix `nimbus_`, drop the default `target.schema + '_'`
       concatenation) (§2).
-- [ ] One trivial model `models/marts/smoke_replication.sql`
+- [x] One trivial model `models/marts/smoke_replication.sql`
       (`select 1 as id, now() as built_at`, materialized `table`).
-- [ ] `warehouse/dbt/.gitignore` (`target/`, `dbt_packages/`, `logs/`), `packages.yml` only if
-      needed (prefer zero packages for now).
+- [x] `warehouse/dbt/.gitignore` (`target/`, `dbt_packages/`, `logs/`); zero packages (no
+      `packages.yml`).
 
 **C. Dev-loop make targets (`scripts/warehouse.mk`)**
 
-- [ ] `wh-setup` — `python3 -m venv warehouse/.venv && pip install dbt-clickhouse` (+ generator
-      deps later); `dbt deps`. Add `warehouse/.venv` to root `.gitignore`.
-- [ ] `wh-portforward` — `kubectl -n clickhouse port-forward svc/clickhouse-clickhouse 8123:8123`
-      (verify the operator-created service name via `make ch-status` first; adjust variable).
-- [ ] `wh-build-local` / `wh-test-local` — `dbt build`/`dbt test` with
-      `--profiles-dir warehouse/dbt/profiles`, venv-activated.
-- [ ] `warehouse-help` section, wired into the root `help` target.
+- [x] `wh-setup` — `python3 -m venv warehouse/.venv && pip install dbt-clickhouse`. Added
+      `warehouse/.venv` to root `.gitignore`. (No `dbt deps` — zero packages.)
+- [x] `wh-portforward` — `kubectl -n clickhouse port-forward svc/clickhouse-clickhouse 8123:8123`
+      (service name confirmed via `make ch-status`). Also added `wh-debug`.
+- [x] `wh-build-local` / `wh-test-local` — `dbt build`/`dbt test` with
+      `--project-dir`/`--profiles-dir`, venv-activated.
+- [x] `warehouse-help` section, wired into the root `help` target.
 
 **D. Replication spike (the research deliverable)**
 
-- [ ] With the port-forward up, run `dbt debug` then build `smoke_replication` and validate:
-      - `cluster` profile setting emits `ON CLUSTER` DDL (check `logs/dbt.log` / `EXPLAIN` via
-        `system.query_log`);
-      - engine is `ReplicatedMergeTree` on **both** replicas (dbt-clickhouse defaults `MergeTree`
-        → Replicated automatically when a cluster is set on recent versions — confirm for our
-        server 26.3 / adapter version, or set the default keeper path/engine explicitly);
-      - table visible and identical from `CH_POD_0` **and** `CH_POD_1`;
-      - a rebuild (`dbt run --full-refresh`) drops/recreates cleanly on cluster (no orphaned
-        replicas — check `system.replicas`).
-- [ ] Encode the working settings as project-level defaults in `dbt_project.yml` /
-      `profiles.yml`, and write the findings into `warehouse/README.md` (started here, grown in P7).
+- [x] With the port-forward up, run `dbt debug` then build `smoke_replication` and validate:
+      - `cluster` profile setting emits `ON CLUSTER` DDL — confirmed;
+      - engine is `ReplicatedMergeTree` on **both** replicas. **Finding:** adapter 1.10.1 does
+        **not** auto-convert `MergeTree → Replicated` from the `cluster` setting on server 26.3 —
+        a bare model became plain `MergeTree` (no replication). Fixed by setting
+        `+engine: ReplicatedMergeTree` explicitly; a bare engine works because the operator sets
+        `default_replica_path=/clickhouse/tables/{uuid}/{shard}` on Atomic DBs (unique path/table);
+      - table visible and identical from `CH_POD_0` **and** `CH_POD_1` — confirmed;
+      - `dbt run --full-refresh` drops/recreates cleanly; `system.replicas` clean (leftover
+        keeper znodes are Atomic deferred-drops, not orphans).
+- [x] Encode the working settings as project-level defaults in `dbt_project.yml` /
+      `profiles.yml` (`cluster`, `cluster_mode: false`, `+engine`), and write the findings into
+      `warehouse/README.md` (started here, grown in P7).
 
 ### Acceptance criteria
 
-- [ ] `kubectl -n clickhouse exec chi-clickhouse-default-0-0-0 -- clickhouse-client -u dbt --password dbt123 -q "SELECT currentUser()"` → `dbt`; same on replica 1.
-- [ ] `dbt` **cannot** drop `demo.events` or read outside its scope (per the grants mechanism chosen); `admin` unaffected (`make ch-demo` still passes).
-- [ ] `dbt debug` green from the host through the port-forward.
-- [ ] `nimbus_marts.smoke_replication` exists with the same row on **both** replicas, engine `Replicated*`.
-- [ ] All of the above achieved via Flux (no `kubectl apply` of CHI/Secret by hand).
+- [x] `kubectl -n clickhouse exec chi-clickhouse-default-0-0-0 -- clickhouse-client -u dbt --password dbt123 -q "SELECT currentUser()"` → `dbt`; same on replica 1.
+- [x] `dbt` **cannot** drop `demo.events` or read outside its scope (via the CHI `<grants>` block); `admin` unaffected (`make ch-demo` still passes).
+- [x] `dbt debug` green from the host through the port-forward.
+- [x] `nimbus_marts.smoke_replication` exists with the same row on **both** replicas, engine `Replicated*`.
+- [x] All of the above achieved via Flux (no `kubectl apply` of CHI/Secret by hand).
 
 **Out of scope:** any real models, bronze tables, images.
 
@@ -153,23 +150,23 @@ referentially-consistent Nimbus data at laptop-real scale (~5k customers, ~2M le
 
 **A. Bronze DDL — `warehouse/loaders/00_create_raw.sql`**
 
-- [ ] `CREATE DATABASE IF NOT EXISTS nimbus_raw ON CLUSTER '{cluster}'` (+ the other `nimbus_*`
+- [x] `CREATE DATABASE IF NOT EXISTS nimbus_raw ON CLUSTER '{cluster}'` (+ the other `nimbus_*`
       databases if not already created by the P0 bootstrap).
-- [ ] The 8 `raw_*` tables exactly per §3 (engines, `PARTITION BY toYYYYMM(...)`, `ORDER BY`),
+- [x] The 8 `raw_*` tables exactly per §3 (engines, `PARTITION BY toYYYYMM(...)`, `ORDER BY`),
       each `ON CLUSTER '{cluster}'` with `Replicated*` engines and explicit keeper paths
       (`/clickhouse/tables/{shard}/nimbus_raw/<table>`, `{replica}`) — same pattern as `ch-demo`.
-- [ ] Idempotent: `CREATE TABLE IF NOT EXISTS`; re-runnable without error.
-- [ ] `make wh-bronze` — pipe the file through `clickhouse-client` on `CH_POD_0` (as `admin`,
+- [x] Idempotent: `CREATE TABLE IF NOT EXISTS`; re-runnable without error.
+- [x] `make wh-bronze` — pipe the file through `clickhouse-client` on `CH_POD_0` (as `admin`,
       since it's DDL bootstrap), one statement at a time (`clickhouse-client` has no multi-stmt:
       use `--multiquery`).
 
 **B. Python generator — `warehouse/generator/`**
 
-- [ ] `generate.py` + `requirements.txt` (stdlib + `faker` optional — prefer stdlib-only for
+- [x] `generate.py` + `requirements.txt` (stdlib + `faker` optional — prefer stdlib-only for
       zero-friction; decide at implementation, document choice).
-- [ ] Deterministic: `--seed 42` default; `--scale small|medium|large` presets
+- [x] Deterministic: `--seed 42` default; `--scale small|medium|large` presets
       (medium = the laptop-real numbers; small ≈ 1/10 for quick CI-style runs).
-- [ ] Generates, in dependency order, as CSV files into `warehouse/generator/out/`:
+- [x] Generates, in dependency order, as CSV files into `warehouse/generator/out/`:
       1. **customers** (~5k) — signup dates over 18 months, weighted countries/risk tiers/referral sources;
       2. **kyc_events** — ordered transitions per customer (`submitted → pending → verified|rejected`),
          realistic conversion (~85% verified), timestamps strictly increasing;
@@ -181,41 +178,41 @@ referentially-consistent Nimbus data at laptop-real scale (~5k customers, ~2M le
          transaction mix: payroll deposits (biweekly), card settlements (linked to auth MCCs),
          P2P, ATM+fee, monthly interest accrual; balances never dip below −overdraft;
          `category_code` values match `seed_transaction_categories`.
-- [ ] Loader step: `cat out/<t>.csv | kubectl exec -i $(CH_POD_0) -- clickhouse-client -u admin … -q "INSERT INTO nimbus_raw.<t> FORMAT CSVWithNames"` (streaming, no temp copy in the pod).
-- [ ] `make wh-generate` — runs generator + load + the native loaders below; prints row counts.
+- [x] Loader step: `cat out/<t>.csv | kubectl exec -i $(CH_POD_0) -- clickhouse-client -u admin … -q "INSERT INTO nimbus_raw.<t> FORMAT CSVWithNames"` (streaming, no temp copy in the pod).
+- [x] `make wh-generate` — runs generator + load + the native loaders below; prints row counts.
 
 **C. ClickHouse-native loaders (tier 3)**
 
-- [ ] `warehouse/loaders/10_gen_app_events.sql` — ~10M `raw_app_events` via
+- [x] `warehouse/loaders/10_gen_app_events.sql` — ~10M `raw_app_events` via
       `numbers()` + `rand()`-derived customer_id (skewed toward active customers), event-name
       distribution, session ids, 18-month spread. Pure SQL `INSERT … SELECT`.
-- [ ] `warehouse/loaders/20_gen_card_auths.sql` — ~1M auth attempts derived from active cards,
+- [x] `warehouse/loaders/20_gen_card_auths.sql` — ~1M auth attempts derived from active cards,
       ~92% approved, decline reasons, ~0.3% `is_fraud`, MCC distribution matching
       `seed_mcc_codes`; **then a second INSERT re-inserting ~3% of rows with a later
       `ingested_at`** (same `auth_id`/`idempotency_key`) — the deliberate duplicates for the
       dedup demo (§1, §5).
-- [ ] Both parameterized by scale via a `-- {SCALE}` substitution or separate small/medium variants
+- [x] Both parameterized by scale via a `-- {SCALE}` substitution or separate small/medium variants
       (keep it simple: `sed`-style envsubst in the make target).
 
 **D. Seeds — `warehouse/dbt/seeds/`**
 
-- [ ] The 5 CSVs per §3 (`seed_transaction_categories`, `seed_mcc_codes`, `seed_fee_schedule`,
+- [x] The 5 CSVs per §3 (`seed_transaction_categories`, `seed_mcc_codes`, `seed_fee_schedule`,
       `seed_countries`, `seed_risk_tiers`) + `seeds/schema.yml` with column docs.
-- [ ] `dbt seed` works host-side (seeds land in `nimbus_raw` or a `nimbus_seeds` schema — decide
+- [x] `dbt seed` works host-side (seeds land in `nimbus_raw` or a `nimbus_seeds` schema — decide
       and encode in `generate_schema_name`; the architecture doc treats them as static dims, so
       `nimbus_raw` is fine).
 
 ### Acceptance criteria
 
-- [ ] `make wh-bronze && make wh-generate` from scratch completes < ~10 min on the laptop.
-- [ ] Row counts (medium scale): `raw_customers` ≈ 5k; `raw_ledger_postings` ≈ 2M;
+- [x] `make wh-bronze && make wh-generate` from scratch completes < ~10 min on the laptop.
+- [x] Row counts (medium scale): `raw_customers` ≈ 5k; `raw_ledger_postings` ≈ 2M;
       `raw_app_events` ≈ 10M; `raw_card_authorizations` ≈ 1.03M (incl. dupes).
-- [ ] **Ledger balances:** `SELECT count() FROM (SELECT transaction_id, sum(if(direction='debit', amount_minor, -amount_minor)) s FROM nimbus_raw.raw_ledger_postings GROUP BY transaction_id HAVING s != 0)` → **0**.
-- [ ] **Dupes present:** `SELECT count() - uniqExact(auth_id) FROM nimbus_raw.raw_card_authorizations` → ~3% of auths, > 0.
-- [ ] **KYC ordering:** no customer has `verified` before `submitted` (spot query).
-- [ ] Determinism: dropping + regenerating yields identical `raw_customers` checksum
+- [x] **Ledger balances:** `SELECT count() FROM (SELECT transaction_id, sum(if(direction='debit', amount_minor, -amount_minor)) s FROM nimbus_raw.raw_ledger_postings GROUP BY transaction_id HAVING s != 0)` → **0**.
+- [x] **Dupes present:** `SELECT count() - uniqExact(auth_id) FROM nimbus_raw.raw_card_authorizations` → ~3% of auths, > 0.
+- [x] **KYC ordering:** no customer has `verified` before `submitted` (spot query).
+- [x] Determinism: dropping + regenerating yields identical `raw_customers` checksum
       (`SELECT sum(cityHash64(*)) …`) for the Python-generated tables.
-- [ ] Data visible from **both** replicas (replication of bronze inserts).
+- [x] Data visible from **both** replicas (replication of bronze inserts).
 
 **Out of scope:** any dbt models over this data (P2+).
 
@@ -538,7 +535,7 @@ phase leaves `main` in a demonstrably working state (its acceptance criteria are
 | --- | --- | --- |
 | `dbt-clickhouse` `ON CLUSTER`/Replicated behavior differs from assumption | P0 | That's why P0 is a spike; fallback = explicit per-model `engine` + keeper path via project vars |
 | Operator 0.27.1 can't express DB-scoped grants in CHI `users:` | P0 | SQL bootstrap script (`01_bootstrap_dbt_user.sql`) run by `wh-bronze` — still deterministic, just not pure-CHI |
-| Laptop memory during 10M-row generation / `fct_app_events` build | P1/P5 | `SCALE=small` preset; month-wise incremental backfill; profile `max_memory_usage` already capped at 1.5G |
+| Laptop memory during 10M-row generation / `fct_app_events` build | P1/P5 | **Hit in P1** (background merges OOM'd the ~1.35 GiB server, not the inserts). Fixed without adding RAM: `merge_tree/merge_max_block_size: 1024` in the CHI local overlay (~8× less memory per merge) + 250k-row insert blocks in `load_bronze.sh` (fewer parts across the 18 monthly partitions → less merging). `SCALE=small` and month-wise backfill remain fallbacks |
 | `kubectl create job --from=cronjob` can't override args for `wh-test` | P3 | Second suspended CronJob (`dbt-tester`) — zero extra tooling |
 | dbt-clickhouse `materialized_view` materialization quirks | P6 | Fallback = target table as dbt model + MV via a `run_operation`/pre-hook `CREATE MATERIALIZED VIEW` |
 | Registry mirror path mismatch for the runner image | P3 | Reference `k3d-local-dev-registry:5000/...` directly in the manifest |

@@ -6,8 +6,8 @@ replicated ClickHouse cluster this repo ships. See the design docs for the full 
 - [`docs/warehouse-architecture.md`](../docs/warehouse-architecture.md) — scenario, schemas, layer design (the *what/why*).
 - [`docs/warehouse-architecture-plan.md`](../docs/warehouse-architecture-plan.md) — the phased build roadmap (the *how/when*).
 
-This README grows phase by phase. Right now it covers **P0** — the foundation and the
-replication spike.
+This README grows phase by phase. Right now it covers **P0** (foundation + replication
+spike) and **P1** (bronze tables + synthetic data).
 
 ## Layout
 
@@ -17,7 +17,15 @@ warehouse/
 │   ├── dbt_project.yml               # project `nimbus`; layer -> database + engine config
 │   ├── profiles/profiles.yml         # env-var driven; same file host + in-cluster
 │   ├── macros/generate_schema_name.sql  # +schema: marts -> database nimbus_marts
+│   ├── seeds/                        # 5 static dimension CSVs + schema.yml (P1)
 │   └── models/marts/smoke_replication.sql  # P0 spike model
+├── generator/
+│   ├── generate.py                   # tier-1 deterministic Python core -> CSV (P1)
+│   └── requirements.txt              # (stdlib-only; no runtime deps)
+├── loaders/
+│   ├── 00_create_raw.sql             # bronze DDL — 8 raw_* tables ON CLUSTER (P1)
+│   ├── 10_gen_app_events.sql         # tier-3 native: ~10M app events (P1)
+│   └── 20_gen_card_auths.sql         # tier-3 native: ~1M auths + ~3% dupes (P1)
 └── README.md
 ```
 
@@ -36,6 +44,92 @@ make wh-test-local     # dbt test
 The dbt project connects over HTTP 8123 as the scoped **`dbt`** ClickHouse user (password
 `dbt123`, dev-only). Host vs in-cluster differ only by `NIMBUS_CH_HOST` (defaults to
 `localhost`; the in-cluster P3 runner will set `clickhouse-clickhouse`).
+
+---
+
+## P1 — bronze DDL + synthetic data
+
+Bronze is the 8 raw source tables (`nimbus_raw.raw_*`) populated with deterministic,
+referentially-consistent Nimbus data at laptop-real scale (~5k customers, ~1.9M ledger
+postings, ~10M app events over 18 months). Three loading tiers, each also a teaching
+example of a different technique:
+
+```bash
+make wh-bronze                 # create nimbus_* databases + 8 raw_* tables ON CLUSTER (admin)
+make wh-generate               # populate everything (SCALE=medium default); prints row counts
+make wh-generate SCALE=small   # ~1/10 scale for a quick run
+make wh-counts                 # re-print bronze row counts
+make wh-drop                   # TRUNCATE all bronze tables (keeps the schema)
+# seeds are dbt's job — needs a port-forward (Mode A):
+make wh-seed                   # load the 5 static dimension CSVs into nimbus_raw
+```
+
+**Tier 1 — Python generator (`generator/generate.py`), the referential backbone.**
+Deterministic (`--seed 42`) and **stdlib-only** (runs from a bare `python3`, no venv —
+determinism was the hard requirement, and `random` covers everything we need, so Faker
+would only add install friction). Emits CSVs in dependency order — customers → KYC events →
+accounts → account events → cards → **balanced double-entry ledger** — which
+`wh-generate` streams into bronze with `INSERT ... FORMAT CSVWithNames`. Guarantees:
+
+- Every `transaction_id`'s postings sum to zero (customer leg + a Nimbus internal/clearing
+  leg). Debits are capped to the running balance, so no account ever goes negative.
+- KYC transitions are strictly ordered (`submitted → pending → verified|rejected`, ~85%
+  verified); accounts/cards only exist for verified customers.
+- A fixed 18-month reference window (`2025-01-01 … 2026-06-30`), so regenerating yields an
+  identical `raw_customers` checksum.
+
+**Tier 2 — dbt seeds (`dbt/seeds/*.csv`).** The 5 static dimensions (transaction
+categories, MCC codes, fee schedule, countries, risk tiers). They land in `nimbus_raw`
+(no `+schema`, so they fall back to `target.schema`) with pinned column types, Replicated.
+
+**Tier 3 — ClickHouse-native loaders (`loaders/10_*.sql`, `loaders/20_*.sql`).** The
+high-volume, low-consistency streams, generated in pure SQL from `numbers()` × `rand()`:
+`raw_app_events` (~10M) and `raw_card_authorizations` (~1M). Both are still referentially
+valid — they pick a real customer / active card via an **array lookup** (a `groupArray`
+held as a query-scalar, indexed per row). This is deliberate: `rand()` inside a `JOIN … ON`
+gets constant-folded to a single value and would collapse every row onto one entity, so the
+index must be materialized in a subquery instead. The card loader then **re-inserts a stable
+~3% of rows** (same `auth_id`, later `ingested_at`) — the intentional duplicates that the
+silver dedup demo (`argMax(ingested_at)`, P4) collapses back.
+
+**Scale + memory.** `SCALE={small,medium,large}` sets customer count (generator) and app-
+event / card-auth volumes (`N_APP_EVENTS` / `N_CARD_AUTHS`, substituted for `__COUNT__` in
+the native SQL). The cluster's total memory is capped ~1.35 GiB (0.9 × the 1536Mi laptop
+pod limit), which the laptop-real load has to live within. Two levers keep it under the cap
+(the P1 memory-risk mitigation) — no extra RAM needed:
+
+- **`loaders/load_bronze.sh`** streams every load in bounded 250k-row blocks (parallel
+  parsing off), truncating first so it's re-runnable, with a purge+retry on transient
+  memory blips. Because the three big tables are `PARTITION BY toYYYYMM` over 18 months,
+  250k blocks give each of the 18 partitions a few large parts instead of hundreds of tiny
+  ones — far less background merging.
+- **The CHI local overlay** (`kubernetes/analytics/clickhouse/local/clickhouse-patch.yaml`)
+  sets `merge_tree/merge_max_block_size: 1024` (default 8192), so each background merge holds
+  ~8× fewer rows at once — the merge that would otherwise want 600+ MiB on a full server
+  (→ `MEMORY_LIMIT_EXCEEDED`) now fits easily. Base/prod keeps ClickHouse defaults.
+
+`medium` (~2M postings, 10M app events, 1M auths) completes in a couple of minutes on a
+laptop and stays comfortably under the cap.
+
+### Bronze invariants (P1 acceptance)
+
+```sql
+-- Ledger balances: every transaction's signed postings sum to zero  -> 0
+SELECT count() FROM (
+  SELECT transaction_id, sum(if(direction='debit', amount_minor, -amount_minor)) s
+  FROM nimbus_raw.raw_ledger_postings GROUP BY transaction_id HAVING s != 0);
+
+-- Dedup material present: dupes = rows - distinct auth_ids  -> ~3% of auths, > 0
+SELECT count() - uniqExact(auth_id) FROM nimbus_raw.raw_card_authorizations;
+
+-- KYC ordering: no 'verified' before 'submitted' per customer  -> 0
+SELECT count() FROM (
+  SELECT customer_id,
+         minIf(event_ts, new_status='submitted') sub,
+         minIf(event_ts, new_status='verified')  ver
+  FROM nimbus_raw.raw_kyc_events GROUP BY customer_id
+  HAVING ver != 0 AND ver < sub);
+```
 
 ---
 
