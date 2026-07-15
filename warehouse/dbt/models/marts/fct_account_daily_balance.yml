@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: fct_account_daily_balance
+    description: >
+      Periodic-snapshot fact — grain account_id x date (one row per account per day it
+      exists). Opening/closing balance plus the deposit/withdrawal split, in minor units.
+      Incremental (delete_insert) by date. Uniqueness of (account_id, date) is asserted by
+      the singular test tests/assert_account_daily_balance_unique.sql at the intermediate
+      grain it projects from.
+    columns:
+      - name: account_id
+        description: Real customer account.
+        data_tests: [not_null]
+      - name: date
+        description: Snapshot day (Date).
+        data_tests: [not_null]
+      - name: opening_balance
+        description: Balance at start of day (prior day's closing), minor units.
+      - name: closing_balance
+        description: Balance at end of day (running cumulative), minor units.
+        data_tests: [not_null]
+      - name: total_deposits
+        description: Credits posted on this day, minor units.
+      - name: total_withdrawals
+        description: Debits posted on this day (positive), minor units.

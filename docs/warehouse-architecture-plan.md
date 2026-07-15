@@ -15,7 +15,7 @@
 | --- | --- | --- | --- |
 | ✅ [P0](#p0--dbt-user--dbt-scaffold--replication-spike) | dbt can build a replicated table as a scoped user | `dbt` user + `warehouse/dbt` scaffold + validated `ON CLUSTER` behavior | running cluster (`make up`) |
 | ✅ [P1](#p1--bronze-ddl--synthetic-data) | Bronze populated with laptop-real Nimbus data | DDL + Python generator + native loaders + seeds | P0 |
-| [P2](#p2--vertical-slice) | One metric flows bronze→metrics end-to-end | ledger → daily balance → finance metric slice | P1 |
+| ✅ [P2](#p2--vertical-slice) | One metric flows bronze→metrics end-to-end | ledger → daily balance → finance metric slice | P1 |
 | [P3](#p3--in-cluster-runtime-v1-contract) | dbt runs **in-cluster** under Flux (v1 contract) | `dbt-runner` image + Job/CronJob + Flux wiring | P2 |
 | [P4](#p4--full-silver) | All staging + intermediate models | dedup, SCD2, funnel, DAU, interchange | P3 |
 | [P5](#p5--full-gold-star-schema) | Complete star schema | SCD2 dims + 4 facts + `dim_date` | P4 |
@@ -228,36 +228,36 @@ the testing pattern every later phase copies.
 
 ### Tasks
 
-- [ ] `models/staging/stg_ledger_postings.sql` (view) — typed/renamed 1:1, `amount_minor` signed
+- [x] `models/staging/stg_ledger_postings.sql` (view) — typed/renamed 1:1, `amount_minor` signed
       convention decided here (`signed_amount_minor = if(direction='credit', +, -)` from the
       account's perspective), plus `posting_date`.
-- [ ] `models/staging/sources.yml` — declare `nimbus_raw` source with freshness off (static demo).
-- [ ] `models/intermediate/int_account_daily_balance.sql` — **incremental table**
+- [x] `models/staging/sources.yml` — declare `nimbus_raw` source with freshness off (static demo).
+- [x] `models/intermediate/int_account_daily_balance.sql` — **incremental table**
       (`incremental_strategy: delete+insert`, partition/day key): date spine via
       `range`/`numbers()` from first posting to max date, cross-joined to accounts, daily net
       via `sum(signed_amount_minor)`, running `sum() OVER (PARTITION BY account ORDER BY day)` →
       opening/closing (§5).
-- [ ] `models/marts/fct_account_daily_balance.sql` — grain account × day; opening/closing,
+- [x] `models/marts/fct_account_daily_balance.sql` — grain account × day; opening/closing,
       deposits, withdrawals; incremental by day (§4).
-- [ ] `models/metrics/metrics_finance_daily.sql` — minimal v1: `date`, `total_deposits`,
+- [x] `models/metrics/metrics_finance_daily.sql` — minimal v1: `date`, `total_deposits`,
       `avg_balance_per_customer` only (revenue columns arrive in P6).
-- [ ] `schema.yml` per layer: `not_null`/`unique` on keys;
+- [x] `schema.yml` per layer: `not_null`/`unique` on keys;
       `unique` on `(account_id, date)` for the snapshot (via `dbt_utils`-free surrogate:
       `unique` on a concat column or a singular test — keep zero packages).
-- [ ] First **singular test**: `tests/assert_ledger_balances.sql` (transaction sums = 0) — the
+- [x] First **singular test**: `tests/assert_ledger_balances.sql` (transaction sums = 0) — the
       pattern for P7's invariant suite.
 
 ### Acceptance criteria
 
-- [ ] `make wh-build-local && make wh-test-local` green.
-- [ ] Spot check: for one sampled account, `closing_balance` on 3 dates equals a hand-computed
+- [x] `make wh-build-local && make wh-test-local` green.
+- [x] Spot check: for one sampled account, `closing_balance` on 3 dates equals a hand-computed
       running sum straight off `raw_ledger_postings`.
-- [ ] Sum of all customer-account closing balances is plausible (positive, stable day-over-day
+- [x] Sum of all customer-account closing balances is plausible (positive, stable day-over-day
       magnitude — no runaway drift).
-- [ ] Incremental behavior: second `dbt run` (no new data) is fast and idempotent (same row
+- [x] Incremental behavior: second `dbt run` (no new data) is fast and idempotent (same row
       counts, same checksums); after inserting one extra posting dated *yesterday*, only recent
       partitions rebuild.
-- [ ] All built tables exist on both replicas.
+- [x] All built tables exist on both replicas.
 
 **Out of scope:** other staging models, SCD2, revenue metrics.
 

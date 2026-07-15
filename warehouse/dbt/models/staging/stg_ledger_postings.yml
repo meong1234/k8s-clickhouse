@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_ledger_postings
+    description: >
+      Typed/renamed view over nimbus_raw.raw_ledger_postings. Adds signed_amount_minor
+      (credit +, debit -, from the account's perspective) and posting_date (Date).
+      1:1 with the source — no dedup or filtering here.
+    columns:
+      - name: posting_id
+        description: Unique id for this ledger leg.
+        data_tests: [not_null, unique]
+      - name: transaction_id
+        description: >
+          Groups the legs of one double-entry transaction; the signed legs sum to zero
+          (asserted by tests/assert_ledger_balances.sql).
+        data_tests: [not_null]
+      - name: account_id
+        description: >
+          The account this leg posts to. May be a real customer account (raw_accounts)
+          or a NIMBUS-* internal clearing account.
+        data_tests: [not_null]
+      - name: posting_date
+        description: Date bucket of posting_ts — the daily grain for the balance snapshot.
+        data_tests: [not_null]
+      - name: direction
+        description: "debit | credit — raw sign carrier; folded into signed_amount_minor."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['debit', 'credit']
+      - name: amount_minor
+        description: Positive magnitude in minor units (cents). Prefer signed_amount_minor downstream.
+      - name: signed_amount_minor
+        description: Amount from the account's perspective — credit (+), debit (-), in minor units.
+        data_tests: [not_null]

@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: int_account_daily_balance
+    description: >
+      Daily running balance per real customer account. Grain: account_id x day, with a
+      row for every day the account exists (date spine) so closing_balance carries across
+      zero-posting days. Incremental (delete_insert) with a carried-opening rebuild window;
+      see the model header for the pattern and caveats. Uniqueness of (account_id, day) is
+      asserted by tests/assert_account_daily_balance_unique.sql; the
+      closing = opening + daily_net invariant by tests/assert_balance_continuity.sql.
+    columns:
+      - name: account_id
+        description: Real customer account (NIMBUS-* internal legs excluded).
+        data_tests: [not_null]
+      - name: day
+        description: Calendar day (Date) of this balance snapshot.
+        data_tests: [not_null]
+      - name: daily_deposits
+        description: Sum of credit amounts posted on this day, minor units.
+      - name: daily_withdrawals
+        description: Sum of debit amounts posted on this day (positive), minor units.
+      - name: daily_net
+        description: Net signed movement on this day (deposits - withdrawals), minor units.
+      - name: opening_balance
+        description: Closing balance of the prior day (= closing_balance - daily_net), minor units.
+      - name: closing_balance
+        description: Running cumulative balance through end of this day, minor units.
+        data_tests: [not_null]

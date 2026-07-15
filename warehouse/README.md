@@ -133,6 +133,99 @@ SELECT count() FROM (
 
 ---
 
+## P2 — vertical slice (ledger → daily balance → finance metric)
+
+P2 proves the whole modeling stack on **one thread** and establishes the patterns every later
+phase copies: the incremental-model shape, the per-account date spine, and the first singular
+tests. Build it host-side (Mode A — needs a port-forward):
+
+```bash
+make wh-build-local   # seeds + stg → int → fct → metric, then all tests
+make wh-test-local    # tests only
+```
+
+The DAG (all `ON CLUSTER`, replicated to both pods):
+
+```
+raw_ledger_postings ─▶ stg_ledger_postings (view)  ─┐
+raw_accounts ──────────────────────────────────────┴▶ int_account_daily_balance (incremental)
+                                                        └▶ fct_account_daily_balance (incremental)
+                                                             └▶ metrics_finance_daily (table)
+```
+
+**Sign convention (defined once, in `stg_ledger_postings`).** Bronze stores `amount_minor` as a
+positive magnitude with the sign in `direction`. Staging folds it into
+`signed_amount_minor = if(direction='credit', +amount, -amount)` — from the **account's**
+perspective: credit = money in (deposit), debit = money out (withdrawal). Everything downstream
+reads the signed column, never the raw magnitude.
+
+**Real accounts only.** The ledger is balanced double-entry, so every transaction also has an
+internal `NIMBUS-*` clearing leg. Daily balances join to `raw_accounts` to keep only real
+customer accounts; the internal legs are excluded (but still make each transaction sum to zero,
+which `tests/assert_ledger_balances.sql` verifies).
+
+**The incremental running-balance pattern (`int_account_daily_balance`).** Grain = account × day,
+with a row for **every** day each account exists (a per-account date spine from `opened_ts` to the
+max posting day, via `ARRAY JOIN range(...)`), so `closing_balance` carries across zero-posting
+days. `closing_balance` is a cumulative `sum(daily_net) OVER (PARTITION BY account ORDER BY day)`.
+That is inherently full-history, so incrementality uses a **carried-opening window**
+(`incremental_strategy: delete_insert`, `partition_by: toYYYYMM(day)`):
+
+- each run recomputes only the trailing window `[max(stored day) − daily_balance_lookback_days,
+  max]` (the var defaults to 3 — set in `dbt_project.yml`);
+- the window's opening balance is **seeded** from the `closing_balance` already stored in
+  `{{ this }}` on the last day before the window, so the running sum stays correct without
+  recomputing all of history;
+- `delete_insert` replaces exactly the recomputed `(account_id, day)` tuples → only recent
+  `toYYYYMM` partitions are touched.
+
+**Caveats to know (they apply to every incremental model built after this one):**
+
+1. **Late data older than the window is not reflected.** A posting dated before
+   `max(day) − daily_balance_lookback_days` is neither re-aggregated nor propagated into the
+   already-frozen later balances. Fix with a targeted rebuild —
+   `dbt run --full-refresh --select int_account_daily_balance` (seconds at this scale). The
+   lookback var only sizes the slack for *slightly*-late data.
+2. **The window tracks `max(day)` in the table, not wall-clock** — a future-dated posting shifts
+   it.
+3. **The `delete_insert` DELETE/INSERT is emitted without `ON CLUSTER`.** Correctness on 1 shard ×
+   2 replicas relies on ReplicatedMergeTree propagating via Keeper — fine here, **not**
+   sharded-safe. Don't copy this model into a multi-shard context expecting `ON CLUSTER` fan-out.
+
+`fct_account_daily_balance` is a thin incremental projection of the intermediate model at the mart
+grain (P5 adds the SCD2 `account_key` + `dim_date` FK). `metrics_finance_daily` is the v1 finance
+metric mart — `date`, `total_deposits`, `avg_balance_per_customer` (revenue columns arrive in P6);
+the metric definitions in its `schema.yml` are the contract.
+
+### Balance invariants (P2 acceptance)
+
+```sql
+-- Grain: (account_id, day) is unique                                    -> tests/assert_account_daily_balance_unique.sql
+-- Continuity: closing_balance = opening_balance + daily_net on every row -> tests/assert_balance_continuity.sql
+-- Ledger still balances through staging                                  -> tests/assert_ledger_balances.sql
+
+-- Spot check: fct closing equals a hand-computed running sum off bronze (-> 0 mismatches)
+WITH raw_run AS (
+  SELECT account_id, toDate(posting_ts) d,
+         sum(sum(if(direction='credit',amount_minor,-amount_minor)))
+             OVER (PARTITION BY account_id ORDER BY toDate(posting_ts)) exp
+  FROM nimbus_raw.raw_ledger_postings
+  WHERE account_id GLOBAL IN (SELECT account_id FROM nimbus_raw.raw_accounts)
+  GROUP BY account_id, d)
+SELECT count() FROM raw_run r
+JOIN nimbus_marts.fct_account_daily_balance f ON f.account_id=r.account_id AND f.date=r.d
+WHERE r.exp != f.closing_balance;
+```
+
+> **Memory note (P1 mitigation still applies).** The pods are capped ~1.35 GiB. If a `dbt build`
+> fails with `MEMORY_LIMIT_EXCEEDED` at connect/introspect time, the server RSS (cgroup memory,
+> incl. page cache from earlier heavy reads) has crept over the cap — restart the pods
+> (`kubectl -n clickhouse delete pod chi-clickhouse-default-0-0-0 chi-clickhouse-default-0-1-0`)
+> and build against the fresh, cold-cache server. P2's working set (the ~2M-row ledger + spine)
+> fits comfortably once RSS is reset.
+
+---
+
 ## P0 spike findings — `dbt-clickhouse` + `ON CLUSTER` + replication
 
 The whole point of P0 was to *validate* how the adapter drives a replicated cluster and how a

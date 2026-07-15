@@ -1,0 +1,27 @@
+version: 2
+
+# Bronze source declaration. The nimbus_raw tables are landed by P1
+# (Python generator + native loaders), not by dbt — dbt only reads them.
+#
+# Freshness is disabled: this is a static synthetic demo, regenerated on demand
+# via `make wh-generate`, so there is no live ingestion clock to check against.
+#
+# P2 touches only the two tables the vertical slice needs. P4 extends this
+# declaration to all 8 raw tables.
+sources:
+  - name: nimbus_raw
+    schema: nimbus_raw
+    description: >
+      Bronze landing tables (P1) — raw, append-only, minimally typed mirrors of the
+      Nimbus source systems. Static synthetic data; freshness checks disabled.
+    freshness: null
+    tables:
+      - name: raw_ledger_postings
+        description: >
+          One double-entry ledger leg. Balanced: every transaction_id's postings sum
+          to zero (customer-account leg + offsetting NIMBUS-* internal/settlement leg).
+          amount_minor is a positive magnitude; the sign comes from `direction`.
+      - name: raw_accounts
+        description: >
+          One row per account (opening snapshot). ReplacingMergeTree(ingested_at) —
+          dedupe on account_id with argMax(ingested_at) when reading directly.

@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: metrics_finance_daily
+    description: >
+      Curated daily finance metrics (v1). Grain: day. The metric definitions here are the
+      contract; revenue metrics (interchange/fee/interest, total_revenue, arpu) are added
+      in P6.
+    columns:
+      - name: date
+        description: Calendar day (Date).
+        data_tests: [not_null, unique]
+      - name: total_deposits
+        description: >
+          Sum of total_deposits (credit postings) across all accounts on this day, minor
+          units. Formula: sum(fct_account_daily_balance.total_deposits) group by date.
+        data_tests: [not_null]
+      - name: avg_balance_per_customer
+        description: >
+          Average closing balance per customer on this day, minor units. Formula:
+          sum(closing_balance) / count(distinct customer_id), integer-divided (minor units).
+        data_tests: [not_null]
