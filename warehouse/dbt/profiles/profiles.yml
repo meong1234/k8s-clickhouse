@@ -1,0 +1,37 @@
+# dbt profile for the Nimbus warehouse.
+#
+# The SAME profile works from the host (dev loop, via `make wh-portforward`) and
+# in-cluster (the P3 dbt-runner Job) — only NIMBUS_CH_HOST differs:
+#   - host:       localhost           (default; port-forward to the CHI service)
+#   - in-cluster: clickhouse-clickhouse (the operator-created CHI service, set via env)
+#
+# dbt-clickhouse talks HTTP (port 8123). `cluster` makes DDL run ON CLUSTER so
+# tables replicate to both pods; the exact engine behavior is validated in the P0 spike.
+nimbus:
+  target: dev
+  outputs:
+    dev:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('NIMBUS_CH_HOST', 'localhost') }}"
+      port: 8123
+      secure: false
+      user: dbt
+      password: "{{ env_var('NIMBUS_CH_PASSWORD', 'dbt123') }}"
+      # Base/default database. Layer placement (nimbus_staging, nimbus_marts, ...)
+      # is handled by the generate_schema_name macro, not by this value.
+      schema: nimbus_raw
+      # Run DDL ON CLUSTER '<cluster>' so models replicate across both pods.
+      # NOTE: setting `cluster` also makes dbt introspect via clusterAllReplicas()
+      # (see list_relations_without_caching), which needs the global REMOTE +
+      # CLUSTER privileges -> granted to `dbt` in the CHI <grants> block. The
+      # table engine is NOT auto-replicated by this setting on adapter 1.10.1;
+      # models set +engine ReplicatedMergeTree explicitly (see dbt_project.yml).
+      cluster: "{{ env_var('NIMBUS_CH_CLUSTER', 'default') }}"
+      # cluster_mode OFF: we do not need dbt's distributed-table / exchange-probe
+      # behaviors (1 shard x 2 replicas is fully replicated, not sharded). Leaving
+      # it on also spins up __dbt_exchange_test_* tables on connect. `cluster`
+      # above is what drives the ON CLUSTER DDL; cluster_mode is orthogonal.
+      cluster_mode: false
+      connect_timeout: 10
+      send_receive_timeout: 300

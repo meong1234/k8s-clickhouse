@@ -1,0 +1,44 @@
+name: nimbus
+version: "0.1.0"
+config-version: 2
+
+# The profile is resolved from warehouse/dbt/profiles/profiles.yml
+# (passed via --profiles-dir by the wh-* make targets).
+profile: nimbus
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Medallion layer -> ClickHouse database mapping.
+# The generate_schema_name override turns each +schema value into `nimbus_<value>`
+# (e.g. marts -> nimbus_marts), so every layer lands in its own ClickHouse database.
+#
+# Replication: table models set +engine ReplicatedMergeTree explicitly. dbt-clickhouse
+# 1.10.1 does NOT auto-convert MergeTree -> Replicated from the `cluster` profile
+# setting (validated in the P0 spike), so we must name the engine. Bare
+# ReplicatedMergeTree works because the operator configures
+# default_replica_path=/clickhouse/tables/{uuid}/{shard} on Atomic databases, giving
+# every table a unique keeper path. Views (staging/intermediate) have no engine.
+models:
+  nimbus:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+      +engine: ReplicatedMergeTree
+    metrics:
+      +schema: metrics
+      +materialized: table
+      +engine: ReplicatedMergeTree

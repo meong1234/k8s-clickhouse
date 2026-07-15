@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - ../base
   - clickhouse-credentials.yaml
+  - dbt-credentials.yaml
 patches:
   - target:
       group: clickhouse.altinity.com

@@ -52,6 +52,45 @@ spec:
         - "0.0.0.0/0"
         - "::/0"
 
+      # ---- Scoped `dbt` user (least-privilege, for the warehouse layer) ----
+      # Authenticates via a SHA256 hash from the `dbt-credentials` Secret (local
+      # overlay). It deliberately does NOT get access_management.
+      #
+      # SPIKE OUTCOME (P0): `allow_databases` was tried first but proved
+      # insufficient - dbt-clickhouse introspects a clustered profile via
+      # clusterAllReplicas(), which needs the GLOBAL `REMOTE` privilege that a
+      # database allow-list cannot express. And because an XML-defined user lives
+      # in read-only `users_xml` access storage, `GRANT ... TO dbt` over SQL fails
+      # (ACCESS_STORAGE_READONLY) - so grants MUST come from this config. The
+      # working, GitOps-native answer is the config-native <grants> block below
+      # (rendered into users.xml by the operator); no SQL bootstrap script needed.
+      # Full details in warehouse/README.md.
+      dbt/password_sha256_hex:
+        valueFrom:
+          secretKeyRef:
+            name: dbt-credentials
+            key: dbt_password_sha256_hex
+      dbt/profile: default
+      dbt/quota: default
+      dbt/networks/ip:
+        - "0.0.0.0/0"
+        - "::/0"
+      # DB-scoped RBAC via a config-native <grants> block (rendered into
+      # users.xml by the operator). GRANT ALL is scoped per-database, so `dbt`
+      # gets full DDL/DML on the nimbus_* databases only and is denied everything
+      # else (e.g. `demo`). system read is for dbt introspection; REMOTE is
+      # required because dbt-clickhouse introspects via clusterAllReplicas() on a
+      # clustered profile. This is the pure-CHI path: no SQL bootstrap script.
+      dbt/grants/query:
+        - "GRANT REMOTE ON *.*"
+        - "GRANT CLUSTER ON *.*"
+        - "GRANT SELECT ON system.*"
+        - "GRANT ALL ON nimbus_raw.*"
+        - "GRANT ALL ON nimbus_staging.*"
+        - "GRANT ALL ON nimbus_intermediate.*"
+        - "GRANT ALL ON nimbus_marts.*"
+        - "GRANT ALL ON nimbus_metrics.*"
+
     profiles:
       default/max_memory_usage: "1500000000"     # ~1.5 GiB, fits the 2Gi pod limit
       default/load_balancing: "nearest_hostname"
