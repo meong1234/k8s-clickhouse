@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: fct_app_events
+    description: >
+      Engagement fact — grain one app event (event_id unique). Thin fact over
+      stg_app_events with customer_key (dim_customers, resolved as-of event_ts) and date
+      (dim_date) FKs. Largest fact (~10M rows); incremental (delete_insert) by event date,
+      with an optional backfill_lo/backfill_hi month-window build for memory-tight runs.
+    columns:
+      - name: event_id
+        description: Unique app-event id — the grain.
+        data_tests: [not_null, unique]
+      - name: customer_id
+        description: Natural customer id of the event.
+        data_tests: [not_null]
+      - name: customer_key
+        description: >
+          dim_customers FK — customer version in effect at event_ts, via ASOF. 0 for the
+          unknown member.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_key
+      - name: date
+        description: Event day (Date). dim_date FK.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date
+      - name: event_ts
+        description: Event timestamp (DateTime); the as-of instant for customer_key.
+        data_tests: [not_null]
+      - name: event_name
+        description: App event name (e.g. app_open, view_balance, ...).
+      - name: device
+        description: Device type the event came from.
+      - name: app_version
+        description: App version string.
+      - name: session_id
+        description: Session identifier.

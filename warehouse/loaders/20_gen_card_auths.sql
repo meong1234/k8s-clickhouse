@@ -7,6 +7,14 @@
 -- constant-folded and would collapse every auth onto one card). The pick index is
 -- materialized in an inner subquery so card_id and account_id agree per row.
 --
+-- TEMPORALLY valid too: auth_ts is drawn from [card issued_ts, window_end], NOT the whole
+-- window. A card can't authorize before it's issued, and issued_ts >= the account's
+-- opened_ts >= the customer's signup_ts, so every auth falls inside a live dim_accounts /
+-- dim_customers validity interval. (Drawing uniformly over the full window instead left
+-- ~47% of auths dated before their account existed — orphaning them onto the gold
+-- star-schema's unknown-member key. The P5 fct_card_authorizations relationships tests
+-- surfaced it.)
+--
 -- Distribution matches the design: ~92% approved, decline reasons on the rest,
 -- ~0.3% is_fraud, MCCs drawn from the set that exists in seed_mcc_codes.
 --
@@ -15,11 +23,13 @@
 -- idempotency_key stay unique (before the deliberate dupe step). Run with --multiquery.
 INSERT INTO nimbus_raw.raw_card_authorizations
 WITH
-    (SELECT groupArray(card_id)    FROM (SELECT card_id, account_id FROM nimbus_raw.raw_cards WHERE status = 'active' ORDER BY card_id)) AS card_ids,
-    (SELECT groupArray(account_id) FROM (SELECT card_id, account_id FROM nimbus_raw.raw_cards WHERE status = 'active' ORDER BY card_id)) AS acct_ids,
+    -- All three arrays share the same `ORDER BY card_id` ordering, so index p aligns
+    -- card_id / account_id / issued_ts to the SAME card.
+    (SELECT groupArray(card_id)    FROM (SELECT card_id, account_id, issued_ts FROM nimbus_raw.raw_cards WHERE status = 'active' ORDER BY card_id)) AS card_ids,
+    (SELECT groupArray(account_id) FROM (SELECT card_id, account_id, issued_ts FROM nimbus_raw.raw_cards WHERE status = 'active' ORDER BY card_id)) AS acct_ids,
+    (SELECT groupArray(issued_ts)  FROM (SELECT card_id, account_id, issued_ts FROM nimbus_raw.raw_cards WHERE status = 'active' ORDER BY card_id)) AS issued_tss,
     length(card_ids) AS n_cards,
-    toDateTime('2025-01-01 00:00:00') AS window_start,
-    toUInt64(dateDiff('second', toDateTime('2025-01-01 00:00:00'), toDateTime('2026-06-30 23:59:59'))) AS window_secs,
+    toDateTime('2026-06-30 23:59:59') AS window_end,
     -- MCCs and matching merchant names (index-aligned) — all present in seed_mcc_codes.
     [5411, 5812, 5541, 5732, 5999, 4111, 5921, 7011, 4899, 5691] AS mccs,
     ['Whole Foods', 'Chipotle', 'Shell', 'Best Buy', 'Amazon', 'Uber',
@@ -29,7 +39,9 @@ SELECT
     concat('AUTH-', leftPad(toString(number + 1), 12, '0')) AS auth_id,
     card_ids[p] AS card_id,
     acct_ids[p] AS account_id,
-    window_start + toIntervalSecond(rand64() % window_secs) AS auth_ts,
+    -- Uniform in [issued_ts, window_end]. greatest(1, ...) guards the modulo for a card
+    -- issued in the final second of the window (dateDiff = 0).
+    issued_tss[p] + toIntervalSecond(rand64() % greatest(toUInt64(1), toUInt64(dateDiff('second', issued_tss[p], window_end)))) AS auth_ts,
     toInt64(100 + (rand() % 45000)) AS amount_minor,
     'USD' AS currency,
     mcc,

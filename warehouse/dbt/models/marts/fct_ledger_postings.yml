@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: fct_ledger_postings
+    description: >
+      Transaction fact — grain one ledger posting (double-entry leg). Carries the
+      account_key (dim_accounts, as-of posting_ts) and date (dim_date) FKs plus the
+      categorized amount/revenue attributes. Incremental (delete_insert) by posting date.
+      Internal NIMBUS-* clearing legs are kept and map to the unknown member account_key 0.
+    columns:
+      - name: posting_id
+        description: Unique ledger leg id — the grain.
+        data_tests: [not_null, unique]
+      - name: transaction_id
+        description: Groups the legs of one double-entry transaction (signed legs sum to zero).
+        data_tests: [not_null]
+      - name: account_id
+        description: Natural account id of the leg (may be a NIMBUS-* internal account).
+        data_tests: [not_null]
+      - name: account_key
+        description: >
+          dim_accounts FK — account version in effect at posting_ts, via ASOF. 0 for the
+          unknown member (e.g. internal clearing legs not in raw_accounts).
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_accounts')
+                field: account_key
+      - name: date
+        description: Posting day (Date). dim_date FK.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date
+      - name: posting_ts
+        description: Posting timestamp (DateTime); the as-of instant for account_key.
+        data_tests: [not_null]
+      - name: direction
+        description: "debit | credit — raw sign carrier."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['debit', 'credit']
+      - name: amount_minor
+        description: Positive magnitude in minor units (cents).
+      - name: signed_amount_minor
+        description: Amount from the account's perspective — credit (+), debit (-), minor units.
+        data_tests: [not_null]
+      - name: category
+        description: Transaction category label from seed_transaction_categories (null if unmapped).
+      - name: is_revenue
+        description: 1 if the posting's category is a revenue line, else 0.
+      - name: revenue_type
+        description: "Revenue classification — interchange | fee | interest | none."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['interchange', 'fee', 'interest', 'none']

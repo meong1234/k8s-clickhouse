@@ -4,17 +4,33 @@ models:
   - name: fct_account_daily_balance
     description: >
       Periodic-snapshot fact — grain account_id x date (one row per account per day it
-      exists). Opening/closing balance plus the deposit/withdrawal split, in minor units.
-      Incremental (delete_insert) by date. Uniqueness of (account_id, date) is asserted by
-      the singular test tests/assert_account_daily_balance_unique.sql at the intermediate
-      grain it projects from.
+      exists). Opening/closing balance plus the deposit/withdrawal split, in minor units,
+      with the star-schema FKs account_key (dim_accounts, end-of-day as-of) and date
+      (dim_date). Incremental (delete_insert) by date. Uniqueness of (account_id, date) is
+      asserted by the singular test tests/assert_account_daily_balance_unique.sql at the
+      intermediate grain it projects from.
     columns:
       - name: account_id
         description: Real customer account.
         data_tests: [not_null]
+      - name: account_key
+        description: >
+          dim_accounts FK — the account version in effect at end-of-day (23:59:59) of the
+          snapshot date, resolved by ASOF join. 0 for the unknown member.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_accounts')
+                field: account_key
       - name: date
-        description: Snapshot day (Date).
-        data_tests: [not_null]
+        description: Snapshot day (Date). dim_date FK.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date
       - name: opening_balance
         description: Balance at start of day (prior day's closing), minor units.
       - name: closing_balance

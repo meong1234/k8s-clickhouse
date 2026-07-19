@@ -1,0 +1,30 @@
+version: 2
+
+models:
+  - name: dim_cards
+    description: >
+      Conformed type-1 card dimension — one row per card (attributes overwrite in place;
+      no history), plus a synthetic unknown-member row (card_key = 0). Surrogate
+      card_key = cityHash64(card_id), computed here only; facts join on card_id and pull
+      card_key from this row.
+    columns:
+      - name: card_key
+        description: >
+          Surrogate key, cityHash64(card_id). Unique per card; 0 is the unknown member.
+          Target of fct_card_authorizations.card_key relationships test.
+        data_tests: [not_null, unique]
+      - name: card_id
+        description: Natural card id.
+        data_tests: [not_null]
+      - name: account_id
+        description: Account the card is attached to.
+      - name: customer_id
+        description: Customer the card belongs to.
+      - name: issued_ts
+        description: Card issuance timestamp.
+      - name: network
+        description: "Card network — visa | mastercard (unknown for the key-0 member)."
+      - name: status
+        description: "Card status — active | blocked | expired (unknown for the key-0 member)."
+      - name: last4
+        description: Last four digits (FixedString(4)).

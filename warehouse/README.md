@@ -352,6 +352,59 @@ re-deduping `raw_accounts` inline (the TODO their P2 comments left for P4).
 
 ---
 
+## P5 — full gold (star schema)
+
+P5 builds the conformed **star schema** in `nimbus_marts` (§4): **4 dimensions** + **4 incremental
+facts**, wired together with `relationships` tests and a documented column on every mart — this layer
+is the contract.
+
+- **Dimensions (tables).** `dim_date` is a gap-free `numbers()` spine (2024-01-01..2027-12-31).
+  `dim_customers` / `dim_accounts` are thin SCD2 projections of the P4 intermediates carrying **all**
+  versions (never `where is_current`), with a surrogate `*_key = cityHash64(natural_key, valid_from)`.
+  `dim_cards` is type-1 (`cityHash64(card_id)`). Each non-date dim carries an **unknown-member
+  (key 0)** row so an ASOF no-match (`join_use_nulls=0` → default 0, not NULL) stays
+  relationships-valid.
+- **Surrogate-key discipline.** The key is **computed in the dim only**; every fact **pulls** it from
+  the ASOF-matched dim row and never recomputes `cityHash64` — a recompute with a differently-typed
+  argument would silently mint a non-matching key. This makes `relationships` pass by construction.
+- **As-of FK resolution (the teaching moment).** Facts attribute each event to the dim **version in
+  effect at event time** via `ASOF LEFT JOIN … AND event_ts >= valid_from` (equality first, one
+  non-strict inequality **last**). Because SCD2 intervals are contiguous, the greatest
+  `valid_from ≤ event_ts` is exactly the containing version, so `valid_to` is never tested.
+  `fct_account_daily_balance` is the one Date-grain fact: it resolves **end-of-day**
+  (`toDateTime(date)+86400-1 >= valid_from`) to avoid silent midnight coercion. `fct_card_authorizations`
+  stages its two ASOF joins **one-per-CTE** (multi-ASOF-in-one-SELECT is fragile) and carries both
+  `account_key` and `customer_key`.
+- **Incremental facts.** `delete_insert` keyed on the event's natural id over a trailing
+  `event_lookback_days` (1) window — idempotent by construction, `>=` (not `>`) so a straggler on the
+  boundary day isn't skipped forever. `fct_app_events` (largest) also accepts `backfill_lo`/`backfill_hi`
+  vars for a month-window build if memory is tight.
+
+**Data fix — auth temporal validity (a P1 defect the P5 tests surfaced).** The gold relationships
+tests exposed that `loaders/20_gen_card_auths.sql` drew `auth_ts` uniformly over the whole 18-month
+window, independent of the card — leaving **~47% of auths dated before their account was opened**, so
+they orphaned onto the unknown member. The loader now draws `auth_ts` from `[card issued_ts,
+window_end]` (issue ≥ account open ≥ signup), so every auth lands inside a live `dim_accounts` /
+`dim_customers` interval. This is exactly the cross-cutting referential bug a tested star schema is
+meant to catch.
+
+### P5 acceptance
+
+- `make wh-build && make wh-test` green — `dbt build --select marts` builds 5 tables + 4 incremental
+  facts and passes **62 tests** (all facts→dims `relationships`, `unique`/`not_null` on surrogate
+  keys, `accepted_values`).
+- **Star-join smoke query** (monthly card spend by region × account_type over
+  `fct_card_authorizations` × `dim_customers` × `dim_accounts` × `dim_date`) returns sane,
+  unknown-member-free results.
+- **As-of correctness** (on the SCD2-varying `kyc_status`; `risk_tier` is static here): a customer's
+  app events resolve to the `submitted`/`pending` (non-current) versions valid *at event time*, not
+  the current `verified` status.
+- **Incremental double-run** leaves counts unchanged; a simulated late app event lands in the right
+  partition (`toYYYYMM=202606`) with an as-of-resolved `customer_key`.
+- `system.replicas` clean; all marts present on both replicas.
+
+---
+
 ## P0 spike findings — `dbt-clickhouse` + `ON CLUSTER` + replication
 
 The whole point of P0 was to *validate* how the adapter drives a replicated cluster and how a

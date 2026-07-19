@@ -21,8 +21,16 @@ clean-targets:
 # models rebuild on each run (int_account_daily_balance / fct_account_daily_balance).
 # Sizes the tolerance for slightly-late postings; genuine older backfill needs a
 # targeted `dbt run --full-refresh --select int_account_daily_balance` (see that model).
+#
+# event_lookback_days — trailing-day re-scan window for the append-only event facts
+# (fct_ledger_postings / fct_card_authorizations / fct_app_events). Kept separate from
+# (and smaller than) daily_balance_lookback_days: event rows have no cross-row
+# dependency, so the window only buys slack for late-arriving events dated before the
+# boundary day — 1 is plenty. delete_insert keys on the event's natural id, so re-scanning
+# a window is idempotent regardless of the value.
 vars:
   daily_balance_lookback_days: 3
+  event_lookback_days: 1
 
 # Medallion layer -> ClickHouse database mapping.
 # The generate_schema_name override turns each +schema value into `nimbus_<value>`

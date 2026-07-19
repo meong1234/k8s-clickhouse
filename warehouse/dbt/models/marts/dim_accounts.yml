@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: dim_accounts
+    description: >
+      Conformed SCD2 account dimension — one row per (account_id, valid_from) validity
+      interval, plus a synthetic unknown-member row (account_key = 0). Surrogate
+      account_key = cityHash64(account_id, valid_from), computed here only; facts pull it
+      from an ASOF join on event time. status is the SCD2-varying attribute;
+      account_type/interest_rate_bps are static across an account's versions.
+    columns:
+      - name: account_key
+        description: >
+          Surrogate key, cityHash64(account_id, valid_from). Unique per validity interval;
+          0 is the unknown member. Target of fct_*.account_key relationships tests.
+        data_tests: [not_null, unique]
+      - name: account_id
+        description: Natural account id (repeats across the account's intervals).
+        data_tests: [not_null]
+      - name: customer_id
+        description: Customer that owns the account (static).
+        data_tests: [not_null]
+      - name: valid_from
+        description: Inclusive start of the interval (account open, or a status-change timestamp).
+        data_tests: [not_null]
+      - name: valid_to
+        description: Exclusive end = next change ts, or the far-future sentinel for the open interval.
+        data_tests: [not_null]
+      - name: is_current
+        description: 1 for the open (latest) interval of an account, else 0.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: status
+        description: "Account status during the interval — active | frozen | closed (unknown for the key-0 member)."
+      - name: account_type
+        description: "checking | savings (static)."
+      - name: interest_rate_bps
+        description: Account interest rate in basis points (static).

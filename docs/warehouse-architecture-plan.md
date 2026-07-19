@@ -399,36 +399,46 @@ teaching-value logic (dedup, SCD2, funnel, DAU, interchange).
 
 ### Tasks
 
-- [ ] `models/marts/dim_date.sql` — spine from `numbers()`: day, week, month, quarter, year,
-      `is_weekend`, month_name; table, small.
-- [ ] `dim_customers` — from `int_customers_scd2` + seed joins (country → region);
-      surrogate `customer_key = cityHash64(customer_id, valid_from)`; `is_current` flag.
-- [ ] `dim_accounts` — same from `int_accounts_scd2` (+ `interest_rate_bps`).
-- [ ] `dim_cards` — type-1, from `stg_cards`.
-- [ ] `fct_ledger_postings` — from `int_ledger_categorized`; FK `account_key` resolved by
-      as-of join (posting_ts within the dim's validity interval — implement via
-      `ASOF JOIN` or interval-range join; this is a teaching moment, comment it); incremental
-      by posting day.
-- [ ] `fct_account_daily_balance` — promote/finish the P2 model (add
-      `total_deposits`/`total_withdrawals` split, account_key FK).
-- [ ] `fct_card_authorizations` — from deduped auths + `int_interchange_revenue`;
-      `interchange_revenue_minor` carried on the fact; incremental by auth day.
-- [ ] `fct_app_events` — thin fact over `stg_app_events` with `customer_key` as-of join +
-      date FK; incremental by day (largest table — validate build memory fits the 1.5G limit;
-      if tight, build month-by-month via incremental backfill loop documented in the README).
-- [ ] `schema.yml` — `relationships` tests facts→dims, `unique` surrogate keys, docs on every
-      column of every mart (this layer is the contract).
+- [x] `models/marts/dim_date.sql` — spine from `numbers()`: day, week, month, quarter, year,
+      `is_weekend`, month_name; table, small. (2024-01-01..2027-12-31, 1461 days.)
+- [x] `dim_customers` — from `int_customers_scd2` (region already joined upstream);
+      surrogate `customer_key = cityHash64(customer_id, valid_from)`; `is_current` flag;
+      unknown-member (key 0) row for ASOF no-match.
+- [x] `dim_accounts` — same from `int_accounts_scd2` (+ `interest_rate_bps`).
+- [x] `dim_cards` — type-1, from `stg_cards`.
+- [x] `fct_ledger_postings` — from `int_ledger_categorized`; FK `account_key` resolved by
+      `ASOF LEFT JOIN` (posting_ts within the dim's validity interval — commented teaching
+      moment: `posting_ts >= valid_from`, greatest match == the containing version because
+      SCD2 intervals are contiguous); incremental by posting day.
+- [x] `fct_account_daily_balance` — promoted the P2 model (split already present; added the
+      `account_key` FK resolved **end-of-day** to avoid Date→midnight coercion).
+- [x] `fct_card_authorizations` — from deduped auths + `int_interchange_revenue`;
+      `interchange_revenue_minor` carried on the fact; `card_key`/`account_key`/`customer_key`
+      resolved via staged one-ASOF-per-CTE; incremental by auth day.
+- [x] `fct_app_events` — thin fact over `stg_app_events` with `customer_key` as-of join +
+      date FK; incremental by day (full 1M/10M build fits; `backfill_lo`/`backfill_hi`
+      month-window fallback documented in the model header).
+- [x] `schema.yml` — per-model `.yml`: `relationships` tests facts→dims, `unique` surrogate
+      keys, docs on every column of every mart (this layer is the contract).
+- [x] **Data fix (P1 defect surfaced by the P5 relationships tests):**
+      `loaders/20_gen_card_auths.sql` drew `auth_ts` uniformly over the whole window, leaving
+      ~47% of auths dated before their account existed → orphaned onto the unknown member.
+      Now gated to `[card issued_ts, window_end]`, so every auth falls in a live dim interval.
 
 ### Acceptance criteria
 
-- [ ] `make wh-build && make wh-test` green (relationships tests included).
-- [ ] Star-join smoke query returns sane results: monthly card spend by region × account_type
-      joining `fct_card_authorizations` × `dim_customers` × `dim_accounts` × `dim_date`.
-- [ ] **As-of correctness spot check:** a customer whose risk_tier changed mid-history has
-      auths attributed to the tier valid *at auth time* (not the current one).
-- [ ] Incremental double-run: unchanged checksums; simulated late event lands in the right
-      partition.
-- [ ] `system.replicas` clean (no readonly/broken replicas) after full builds.
+- [x] `make wh-build && make wh-test` green (relationships tests included). Verified host
+      dev-loop: `dbt build --select marts` → 5 tables + 4 incremental facts + 62 tests, PASS.
+- [x] Star-join smoke query returns sane results: monthly card spend by region × account_type
+      joining `fct_card_authorizations` × `dim_customers` × `dim_accounts` × `dim_date`
+      (0 unknown-member rows after the data fix).
+- [x] **As-of correctness spot check:** demonstrated on the SCD2-varying attribute `kyc_status`
+      (note: `risk_tier` is static in this data model). A customer's app events resolve to the
+      `submitted`/`pending` (non-current) versions valid at event time, not the current
+      `verified` status.
+- [x] Incremental double-run: unchanged counts; simulated late app event landed in the right
+      partition (`toYYYYMM = 202606`) with an as-of-resolved `customer_key`.
+- [x] `system.replicas` clean (no readonly/broken replicas); all marts present on both replicas.
 
 ---
 

@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: >
+      Conformed date-spine dimension, grain one row per calendar day. Generated from a
+      numbers() range (2024-01-01 .. 2027-12-31), so it is gap-free and brackets the
+      synthetic data window. The `date` column is the join key every fact references; the
+      spine must span all fact dates or fact->dim_date relationships tests fail.
+    columns:
+      - name: date
+        description: Calendar day (Date). Primary/join key of the dimension.
+        data_tests: [not_null, unique]
+      - name: year
+        description: Calendar year (e.g. 2025).
+        data_tests: [not_null]
+      - name: quarter
+        description: Quarter of the year, 1-4.
+      - name: month
+        description: Month of the year, 1-12.
+      - name: month_name
+        description: Full English month name (January .. December).
+      - name: week
+        description: ISO-8601 week number (weeks start Monday; week 1 holds the first Thursday).
+      - name: day_of_month
+        description: Day of the month, 1-31.
+      - name: day_of_week
+        description: Day of week, 1 = Monday .. 7 = Sunday.
+      - name: day_name
+        description: Full English weekday name (Monday .. Sunday).
+      - name: is_weekend
+        description: 1 if Saturday or Sunday, else 0.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]

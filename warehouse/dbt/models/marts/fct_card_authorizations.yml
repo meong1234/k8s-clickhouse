@@ -1,0 +1,83 @@
+version: 2
+
+models:
+  - name: fct_card_authorizations
+    description: >
+      Card-authorization fact — grain one deduped auth (auth_id unique). Carries card_key
+      (dim_cards, type-1), account_key and customer_key (both dim SCD2, resolved as-of
+      auth_ts), and date (dim_date), plus approved/is_fraud flags and interchange revenue
+      (0 for declined/unmatched). Incremental (delete_insert) by auth date.
+    columns:
+      - name: auth_id
+        description: Unique authorization id (deduped upstream) — the grain.
+        data_tests: [not_null, unique]
+      - name: card_id
+        description: Natural card id of the auth.
+        data_tests: [not_null]
+      - name: account_id
+        description: Natural account id of the auth.
+        data_tests: [not_null]
+      - name: card_key
+        description: dim_cards FK (type-1), joined on card_id. 0 for the unknown member.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_cards')
+                field: card_key
+      - name: account_key
+        description: dim_accounts FK — account version in effect at auth_ts, via ASOF. 0 for the unknown member.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_accounts')
+                field: account_key
+      - name: customer_key
+        description: >
+          dim_customers FK — customer version in effect at auth_ts, via ASOF (customer
+          reached through dim_cards). 0 for the unknown member. This is what makes the as-of
+          correctness check work: an auth before KYC verification carries the pre-verified
+          customer version, not the current one.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_key
+      - name: date
+        description: Auth day (Date). dim_date FK.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date
+      - name: auth_ts
+        description: Authorization timestamp (DateTime); the as-of instant for account_key/customer_key.
+        data_tests: [not_null]
+      - name: amount_minor
+        description: Authorized amount in minor units (cents).
+      - name: currency
+        description: ISO currency code of the auth.
+      - name: mcc
+        description: Merchant category code.
+      - name: merchant_name
+        description: Merchant display name.
+      - name: approved
+        description: 1 if the auth was approved, else 0.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: is_fraud
+        description: 1 if the auth is flagged fraudulent, else 0.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: interchange_revenue_minor
+        description: >
+          Interchange revenue in minor units (intDiv(amount_minor * rate_bps, 10000) from
+          int_interchange_revenue); 0 for declined or unmatched auths.
+        data_tests: [not_null]
