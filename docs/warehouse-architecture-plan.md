@@ -275,45 +275,50 @@ phase grows under a working GitOps runtime.
 
 **A. Image**
 
-- [ ] `warehouse/Dockerfile` — `python:3.12-slim`, `pip install dbt-clickhouse` (pin versions),
-      `COPY warehouse/dbt /app/dbt`, `WORKDIR /app/dbt`, `DBT_PROFILES_DIR=/app/dbt/profiles`,
-      default cmd `dbt build`. No secrets baked in (password from env).
-- [ ] `make wh-image` — `docker build -t localhost:5050/nimbus/dbt-runner:local -f warehouse/Dockerfile . && docker push …`
-      (same push pattern as `fluxcd-push-images`; in-cluster ref
-      `k3d-local-dev-registry:5000/nimbus/dbt-runner:local` via the docker.io mirror **only if**
-      the repo path matches the mirror rules — verify; otherwise reference the registry name
-      directly in the manifest, which k3s resolves via the registry config).
+- [x] `warehouse/Dockerfile` — `python:3.12-slim`, `pip install "dbt-clickhouse==1.10.1"`
+      (pinned to the host-venv version), `COPY warehouse/dbt /app/dbt`, `WORKDIR /app/dbt`,
+      `DBT_PROFILES_DIR=/app/dbt/profiles`, default cmd `dbt build`. No secrets baked in
+      (host/password from env). Added a repo-root `.dockerignore` (context is the repo root).
+- [x] `make wh-image` — `docker build -t localhost:5050/nimbus/dbt-runner:local -f warehouse/Dockerfile . && docker push …`.
+      **Decided:** reference the registry name **directly** in the manifest
+      (`k3d-local-dev-registry:5000/nimbus/dbt-runner:local`) — `nimbus/dbt-runner` is not a
+      docker.io path so it does NOT resolve via the docker.io mirror; k3s resolves the registry
+      host via the k3d registry config. `imagePullPolicy: Always` (mutable `:local` tag).
 
 **B. Manifests — `kubernetes/analytics/dbt/{base,local}`**
 
-- [ ] Reuse namespace `clickhouse` (decision: the runner is part of the analytics stack; the
-      `dbt-credentials` Secret already lives there — no cross-ns secret copying).
-- [ ] `base/cronjob.yaml` — CronJob `dbt-runner`, `suspend: true` in base (schedule is an
-      overlay concern), `schedule: "0 2 * * *"`, container from the runner image, env:
-      `NIMBUS_CH_HOST=clickhouse-clickhouse` (the CHI service — confirm exact name from
-      `make ch-status`), `NIMBUS_CH_PASSWORD` from Secret `dbt-credentials`
-      (requires adding the **plaintext** key `dbt_password` to the secret alongside the hash —
-      dbt needs the real password, the CHI needs the hash; document both keys in the secret),
-      `restartPolicy: Never`, `backoffLimit: 1`, resources ~256Mi/500m.
-- [ ] `base/kustomization.yaml`; `local/` overlay: image tag, `suspend: false` if we want the
-      schedule live locally, trimmed resources.
-- [ ] Flux wiring: append Kustomization `dbt-runner` to
+- [x] Reuse namespace `clickhouse` (the `dbt-credentials` Secret already lives there — no
+      cross-ns secret copying).
+- [x] `base/cronjob.yaml` — CronJob `dbt-runner`, `suspend: true` in base,
+      **`schedule: "0 */3 * * *"`** (every 3h — user choice, not the daily `0 2 * * *` first
+      sketched), env `NIMBUS_CH_HOST=clickhouse-clickhouse` + `NIMBUS_CH_CLUSTER=default`,
+      `NIMBUS_CH_PASSWORD` from Secret `dbt-credentials` key **`dbt_password`**,
+      `restartPolicy: Never`, `backoffLimit: 1`, resources 128Mi/256Mi.
+      Secret change applied to `kubernetes/analytics/clickhouse/local/dbt-credentials.yaml`:
+      plaintext `dbt_password` added alongside `dbt_password_sha256_hex`, both documented.
+- [x] `base/kustomization.yaml` (runner + tester); `local/` overlay is a documented pass-through
+      (base is already laptop-sized; schedule **stays suspended locally** per the user — manual
+      `wh-build` is the drive path, so no `suspend: false` override).
+- [x] Flux wiring: appended Kustomization `dbt-runner` to
       `kubernetes/clusters/local/analytics.yaml` — `dependsOn: [clickhouse-chi]`,
       `path: ./dbt/local`, `sourceRef: analytics-source`, `wait: false`, `prune: true`.
 
 **C. Make targets (in-cluster contract)**
 
-- [ ] `wh-build` — `kubectl -n clickhouse create job dbt-build-$$(date +%s) --from=cronjob/dbt-runner`
-      then wait on `condition=complete` (with timeout + failure surface).
-- [ ] `wh-test` — same, overriding the command to `dbt test` (`kubectl create job --from` can't
-      override args → template a Job manifest via `kubectl create … --dry-run=client -o yaml |
-      yq/sed` or keep a second suspended CronJob `dbt-tester`; **decide at implementation,
-      prefer the second CronJob for zero yq dependency**).
-- [ ] `wh-logs` — `kubectl -n clickhouse logs -l job-name --tail=…` of the most recent dbt job
-      (label jobs `app=dbt-runner` for a clean selector).
-- [ ] `wh-all` (first version) — `wh-image wh-bronze wh-generate wh-build wh-test`.
+- [x] `wh-build` — `kubectl -n clickhouse create job dbt-build-$$(date +%s) --from=cronjob/dbt-runner`
+      then poll for **Complete or Failed** (bounded by `WH_JOB_TIMEOUT_S`, streams logs, non-zero
+      exit on failure/timeout). Shared canned recipe `wh_run_job` (also used by `wh-test`).
+- [x] `wh-test` — **Decided: second suspended CronJob `dbt-tester`** (`command: [dbt, test]`),
+      zero `yq`/`sed` dependency, since `kubectl create job --from` can't override the command.
+- [x] `wh-logs` — `kubectl -n clickhouse logs -l app=dbt-runner --tail=200` (pods carry
+      `app=dbt-runner`); `JOB=<name>` override to follow a specific Job.
+- [x] `wh-all` (first version) — `wh-image wh-bronze wh-generate wh-build wh-test`.
 
 ### Acceptance criteria
+
+> Static validation done (kustomize build of `dbt/{base,local}` + `clickhouse/local`; rendered
+> manifests inspected; `make -n` dry-runs of `wh-build`/`wh-test`/`wh-image`/`wh-all`). The
+> runtime checks below need a live cluster (`make up`) and are pending that run.
 
 - [ ] `make wh-image && make fluxcd-push-artifacts` → `flux get kustomizations` shows
       `dbt-runner` Ready, CronJob exists.
@@ -324,8 +329,8 @@ phase grows under a working GitOps runtime.
       is self-sufficient, no host dbt needed).
 - [ ] Host dev-loop (`wh-build-local`) still works unchanged.
 
-**Out of scope:** scheduling policy tuning, alerting/notification on Job failure (mention as a
-future extension in the README).
+**Out of scope:** scheduling policy tuning, alerting/notification on Job failure (noted as a
+future extension in the README — notification-controller is already installed).
 
 ---
 

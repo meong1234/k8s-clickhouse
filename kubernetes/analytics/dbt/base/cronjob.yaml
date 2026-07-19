@@ -1,0 +1,65 @@
+---
+# dbt-runner — the P3 v1 delivery contract ("Mode B"): the Nimbus dbt build runs
+# INSIDE the cluster, as a CronJob under Flux, talking to the CHI HTTP service directly
+# (no host, no port-forward). Credentials come from the `dbt-credentials` Secret.
+#
+# `suspend: true` here in base: the schedule is an overlay concern, and even the local
+# overlay keeps it suspended — the drive path is a manual Job (`make wh-build`, which does
+# `kubectl create job --from=cronjob/dbt-runner`). The schedule exists so the runtime is
+# a real, scheduled CronJob; overlays flip `suspend` if/when unattended runs are wanted.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dbt-runner
+  namespace: clickhouse
+  labels:
+    app: dbt-runner
+spec:
+  schedule: "0 */3 * * *"      # every 3 hours (overlay/dev choice; suspended by default)
+  suspend: true
+  concurrencyPolicy: Forbid    # never overlap two dbt builds against the same warehouse
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 1          # one retry, then fail (so `make wh-build` surfaces errors)
+      # Manually-created Jobs (`kubectl create job --from`) copy this jobTemplate, so the
+      # `app: dbt-runner` pod label below is what `make wh-logs -l app=dbt-runner` selects.
+      template:
+        metadata:
+          labels:
+            app: dbt-runner
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: dbt
+              # Referenced by the in-cluster registry name directly: `nimbus/dbt-runner`
+              # is not a docker.io path, so it does NOT resolve via the docker.io->registry
+              # mirror; k3s resolves this host via the k3d registry config. `:local` is a
+              # mutable tag rebuilt by `make wh-image`, so pull Always to avoid a stale image.
+              image: k3d-local-dev-registry:5000/nimbus/dbt-runner:local
+              imagePullPolicy: Always
+              # Default command is the image CMD (`dbt build`) — the full P2 DAG + tests.
+              env:
+                # The operator-created CHI service that exposes HTTP 8123 in-cluster.
+                - name: NIMBUS_CH_HOST
+                  value: clickhouse-clickhouse
+                # Explicit cluster name → drives ON CLUSTER DDL (matches the CHI cluster).
+                - name: NIMBUS_CH_CLUSTER
+                  value: default
+                # The scoped `dbt` user's REAL password (plaintext) — dbt sends it over
+                # HTTP. The CHI consumes the SHA256 hash of the same value; both live in
+                # the dbt-credentials Secret (keys dbt_password / dbt_password_sha256_hex).
+                - name: NIMBUS_CH_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dbt-credentials
+                      key: dbt_password
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

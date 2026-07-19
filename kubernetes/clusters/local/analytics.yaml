@@ -56,3 +56,27 @@ spec:
   path: ./clickhouse/local
   prune: true
   wait: false
+---
+# 3) dbt runtime (P3, v1 contract): the in-cluster dbt-runner / dbt-tester CronJobs that
+#    run the Nimbus build/tests as Flux-managed Jobs. Depends on the CHI so the target
+#    warehouse (and the dbt-credentials Secret it reads) exist before the runner deploys.
+#    Manually driven via `make wh-build` / `make wh-test`; the CronJobs are suspended.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: dbt-runner
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: clickhouse-chi
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./dbt/local
+  prune: true
+  # wait:false - a suspended CronJob has no rollout to wait on; dependsOn ordering is
+  # what matters (the CHI + Secret must exist first).
+  wait: false

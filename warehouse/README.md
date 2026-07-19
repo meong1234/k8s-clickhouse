@@ -226,6 +226,88 @@ WHERE r.exp != f.closing_balance;
 
 ---
 
+## P3 — in-cluster runtime (the v1 contract, "Mode B")
+
+Everything above runs **Mode A**: dbt on your laptop (`warehouse/.venv`) reaching ClickHouse
+through `make wh-portforward`. Handy for authoring, but it is not how the warehouse ships. The
+locked v1 delivery contract is **Mode B** — dbt runs **inside the cluster**, as a Flux-managed
+Job, talking to the CHI service directly (no host, no port-forward), reading its password from a
+Secret. P3 lands that runtime now, on the small P2 DAG, so every later phase grows under a GitOps
+runtime that already works. Mode A stays as a dev-loop convenience.
+
+### The runner image
+
+`warehouse/Dockerfile` bakes the dbt project + a pinned `dbt-clickhouse==1.10.1` (the same adapter
+the host venv uses) into `python:3.12-slim`, with `DBT_PROFILES_DIR` preset and a default
+`CMD ["dbt","build"]`. **No secrets are baked in** — the committed `profiles/profiles.yml` already
+resolves the host and password from `NIMBUS_CH_HOST` / `NIMBUS_CH_PASSWORD` via `env_var()`, and
+the CronJob supplies both. The build context is the **repo root** (the `COPY` is repo-relative),
+so `.dockerignore` keeps `.venv` / generated data / `target` out of it.
+
+```bash
+make wh-image     # docker build -f warehouse/Dockerfile . -> push localhost:5050/nimbus/dbt-runner:local
+```
+
+The manifest references the image by the **in-cluster** registry name
+(`k3d-local-dev-registry:5000/nimbus/dbt-runner:local`) directly: `nimbus/dbt-runner` is not a
+docker.io path, so it does not resolve through the docker.io→registry mirror; k3s resolves the
+registry host via the k3d registry config. The `:local` tag is mutable and `imagePullPolicy:
+Always`, so each `wh-image` rebuild is what the next `wh-build` runs.
+
+### Manifests — `kubernetes/analytics/dbt/{base,local}`
+
+Two CronJobs in the existing `clickhouse` namespace (where the `dbt-credentials` Secret already
+lives — no cross-namespace copying):
+
+- **`dbt-runner`** — `dbt build`; **`dbt-tester`** — `dbt test`. Why two? `kubectl create job
+  --from=cronjob` copies the Job spec verbatim and **cannot override the container command**, so a
+  second CronJob is the zero-`yq` way to give `wh-test` a clean source.
+- Both are `suspend: true` with `schedule: "0 */3 * * *"`. The schedule stays **suspended even
+  locally** — the drive path is a manual Job (`make wh-build` / `wh-test`), and a laptop cluster
+  should not fire unattended builds. The schedule is there so the runtime is a real CronJob a
+  future environment can simply un-suspend.
+- Flux wiring: a `dbt-runner` Kustomization in `kubernetes/clusters/local/analytics.yaml`
+  (`dependsOn: clickhouse-chi`, `path: ./dbt/local`), so the CHI + Secret exist first.
+
+**Secret — one password, two forms.** The CHI stores the `dbt` user by SHA256 hash, but dbt sends
+the real password over HTTP. So `dbt-credentials` now carries **both** keys for the same dev value
+(`dbt123`): `dbt_password_sha256_hex` (CHI) and the new plaintext `dbt_password` (the runner env).
+To rotate: `make ch-password PASSWORD=…` for the hash, update the plaintext, and update the
+`profiles.yml` default.
+
+### Run it
+
+```bash
+# One-time / after any model or Dockerfile change:
+make wh-image                 # build + push the runner image
+make fluxcd-push-artifacts    # re-push analytics-sync (new dbt/ + secret key) AND cluster-sync
+flux reconcile source oci analytics-source   # or wait for the 1m interval
+flux get kustomizations       # -> dbt-runner Ready
+kubectl -n clickhouse get cronjob             # -> dbt-runner, dbt-tester (SUSPEND=True)
+
+# The actual in-cluster runtime:
+make wh-build                 # Job from cronjob/dbt-runner; waits, streams logs, fails loud
+make wh-test                  # Job from cronjob/dbt-tester (dbt test)
+make wh-logs                  # tail the latest dbt-runner pod (JOB=<name> to target one)
+make wh-all                   # image -> bronze -> generate -> build -> test, end to end
+```
+
+### P3 acceptance
+
+- `flux get kustomizations` shows `dbt-runner` **Ready**; both CronJobs exist, suspended.
+- `make wh-build` runs the **P2 DAG in-cluster** to `Complete` (exit 0); `make wh-logs` shows dbt's
+  model-by-model output; `make wh-test` is green.
+- **Self-sufficient, no host dbt:** `DROP DATABASE nimbus_marts ON CLUSTER '{cluster}'`
+  (`make ch-client`), then `make wh-build` rebuilds `fct_account_daily_balance` on both replicas.
+- The host dev-loop (`make wh-build-local`) still works unchanged.
+
+> **Not yet (future extension).** Scheduling-policy tuning and alerting on Job failure are out of
+> scope for P3. Today a failed run surfaces via `make wh-build`'s non-zero exit and `wh-logs`; a
+> later phase can wire a Flux `Alert`/`Provider` (notification-controller is already installed) to
+> push CronJob failures somewhere.
+
+---
+
 ## P0 spike findings — `dbt-clickhouse` + `ON CLUSTER` + replication
 
 The whole point of P0 was to *validate* how the adapter drives a replicated cluster and how a

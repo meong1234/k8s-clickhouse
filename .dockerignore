@@ -1,0 +1,11 @@
+# The dbt-runner build context is the repo root (see warehouse/Dockerfile). Keep it
+# small and reproducible: exclude the host virtualenv, generated data, and dbt build
+# artifacts so they never bloat the context or leak stale state into the image.
+.git
+**/.venv
+warehouse/generator/out
+warehouse/dbt/target
+warehouse/dbt/logs
+**/__pycache__
+**/*.pyc
+.DS_Store

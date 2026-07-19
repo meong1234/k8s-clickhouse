@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Local overlay for the dbt runtime. This is the path Flux reconciles
+# (kubernetes/clusters/local/analytics.yaml → path: ./dbt/local) and the seam where a
+# future non-local environment would patch image tag / schedule / resources.
+#
+# The base is already laptop-sized (128Mi/256Mi, suspended, every-3h schedule), and the
+# local choice is to KEEP the schedule suspended and drive builds manually via
+# `make wh-build`, so there is nothing to override here — a clean pass-through.
+resources:
+  - ../base

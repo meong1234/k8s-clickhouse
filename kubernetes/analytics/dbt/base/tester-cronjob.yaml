@@ -1,0 +1,53 @@
+---
+# dbt-tester — identical to dbt-runner EXCEPT it runs `dbt test` instead of `dbt build`.
+#
+# Why a whole second CronJob? `kubectl create job --from=cronjob/<name>` copies the job
+# spec verbatim and CANNOT override the container command/args. Keeping a second suspended
+# CronJob with `command: [dbt, test]` lets `make wh-test` do the same clean
+# `create job --from=cronjob/dbt-tester` with ZERO yq/sed templating. (Spec: P3, the
+# kubectl arg-override limitation.)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dbt-tester
+  namespace: clickhouse
+  labels:
+    app: dbt-tester
+spec:
+  schedule: "0 */3 * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: dbt-tester
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: dbt
+              image: k3d-local-dev-registry:5000/nimbus/dbt-runner:local
+              imagePullPolicy: Always
+              command: ["dbt", "test"]   # the ONLY functional difference from dbt-runner
+              env:
+                - name: NIMBUS_CH_HOST
+                  value: clickhouse-clickhouse
+                - name: NIMBUS_CH_CLUSTER
+                  value: default
+                - name: NIMBUS_CH_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dbt-credentials
+                      key: dbt_password
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
