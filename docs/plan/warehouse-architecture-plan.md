@@ -16,11 +16,11 @@
 | ✅ [P0](#p0--dbt-user--dbt-scaffold--replication-spike) | dbt can build a replicated table as a scoped user | `dbt` user + `warehouse/dbt` scaffold + validated `ON CLUSTER` behavior | running cluster (`make up`) |
 | ✅ [P1](#p1--bronze-ddl--synthetic-data) | Bronze populated with laptop-real Nimbus data | DDL + Python generator + native loaders + seeds | P0 |
 | ✅ [P2](#p2--vertical-slice) | One metric flows bronze→metrics end-to-end | ledger → daily balance → finance metric slice | P1 |
-| [P3](#p3--in-cluster-runtime-v1-contract) | dbt runs **in-cluster** under Flux (v1 contract) | `dbt-runner` image + Job/CronJob + Flux wiring | P2 |
-| [P4](#p4--full-silver) | All staging + intermediate models | dedup, SCD2, funnel, DAU, interchange | P3 |
-| [P5](#p5--full-gold-star-schema) | Complete star schema | SCD2 dims + 4 facts + `dim_date` | P4 |
-| [P6](#p6--metrics-layer--real-time-showcase) | Metrics marts + streaming rollup | 3 metric marts + cohorts + AggregatingMergeTree/MV | P5 |
-| [P7](#p7--data-tests-docs-readme) | Trustworthy + documented | fintech invariant tests, `dbt docs`, exposures, READMEs | P6 |
+| ✅ [P3](#p3--in-cluster-runtime-v1-contract) | dbt runs **in-cluster** under Flux (v1 contract) | `dbt-runner` image + Job/CronJob + Flux wiring | P2 |
+| ✅ [P4](#p4--full-silver) | All staging + intermediate models | dedup, SCD2, funnel, DAU, interchange | P3 |
+| ✅ [P5](#p5--full-gold-star-schema) | Complete star schema | SCD2 dims + 4 facts + `dim_date` | P4 |
+| [P6](#p6--real-time-restructure-lambda) | **Real-time restructure** per [`realtime-warehouse-architecture.md`](realtime-warehouse-architecture.md) — MV-cascade serving plane + batch spine (lambda) | `nimbus_stream` + `nimbus_rt` via dbt-owned MVs/dictionaries, batch-truth metrics, reconciliation, control-plane split | P5 |
+| [P7](#p7--data-tests-docs-readme) | Trustworthy + documented | fintech invariant tests, cohorts, `dbt docs`, exposures, READMEs | P6 |
 
 **Conventions used throughout** (from the existing repo):
 
@@ -320,14 +320,14 @@ phase grows under a working GitOps runtime.
 > manifests inspected; `make -n` dry-runs of `wh-build`/`wh-test`/`wh-image`/`wh-all`). The
 > runtime checks below need a live cluster (`make up`) and are pending that run.
 
-- [ ] `make wh-image && make fluxcd-push-artifacts` → `flux get kustomizations` shows
+- [x] `make wh-image && make fluxcd-push-artifacts` → `flux get kustomizations` shows
       `dbt-runner` Ready, CronJob exists.
-- [ ] `make wh-build` runs the **P2 DAG in-cluster** to completion (Job `Complete`, exit 0);
+- [x] `make wh-build` runs the **P2 DAG in-cluster** to completion (Job `Complete`, exit 0);
       `make wh-logs` shows dbt's model-by-model output.
-- [ ] `make wh-test` green in-cluster.
-- [ ] Deleting the `nimbus_marts` database and re-running `make wh-build` rebuilds it (runtime
+- [x] `make wh-test` green in-cluster.
+- [x] Deleting the `nimbus_marts` database and re-running `make wh-build` rebuilds it (runtime
       is self-sufficient, no host dbt needed).
-- [ ] Host dev-loop (`wh-build-local`) still works unchanged.
+- [x] Host dev-loop (`wh-build-local`) still works unchanged.
 
 **Out of scope:** scheduling policy tuning, alerting/notification on Job failure (noted as a
 future extension in the README — notification-controller is already installed).
@@ -346,47 +346,47 @@ teaching-value logic (dedup, SCD2, funnel, DAU, interchange).
 
 **A. Staging (`models/staging/`, all views, 1:1, typed/renamed)**
 
-- [ ] `stg_customers`, `stg_kyc_events`, `stg_accounts`, `stg_account_events`, `stg_cards`,
+- [x] `stg_customers`, `stg_kyc_events`, `stg_accounts`, `stg_account_events`, `stg_cards`,
       `stg_app_events` — mechanical.
-- [ ] `stg_card_auths` — **the dedup showcase**: `GROUP BY auth_id` +
+- [x] `stg_card_auths` — **the dedup showcase**: `GROUP BY auth_id` +
       `argMax(<every column>, ingested_at)` (latest ingest wins). Consider a small
       `dedupe_latest()` macro in `macros/` to keep it readable and reusable.
-- [ ] Extend `sources.yml` to all 8 raw tables with descriptions.
+- [x] Extend `sources.yml` to all 8 raw tables with descriptions.
 
 **B. Intermediate (`models/intermediate/`)**
 
-- [ ] `int_customers_scd2` — from `stg_customers` × `stg_kyc_events`: one row per state
+- [x] `int_customers_scd2` — from `stg_customers` × `stg_kyc_events`: one row per state
       interval; `valid_from = event_ts`, `valid_to = leadInFrame(event_ts) OVER (PARTITION BY
       customer_id ORDER BY event_ts …)` with `NULL`/max-date for current; initial interval from
       signup with `kyc_status='none'` (§4 "derived, not snapshot").
-- [ ] `int_accounts_scd2` — same pattern from `stg_accounts` × `stg_account_events`.
-- [ ] `int_ledger_categorized` — join `stg_ledger_postings` → `seed_transaction_categories`
+- [x] `int_accounts_scd2` — same pattern from `stg_accounts` × `stg_account_events`.
+- [x] `int_ledger_categorized` — join `stg_ledger_postings` → `seed_transaction_categories`
       (+ `seed_mcc_codes` where `mcc` present); flags `is_revenue`, `revenue_type`.
-- [ ] `int_card_auths_deduped` — thin passthrough of `stg_card_auths` if dedup fully lives in
+- [x] `int_card_auths_deduped` — thin passthrough of `stg_card_auths` if dedup fully lives in
       staging (keep the model for DAG-shape parity with §5, or fold it — decide; default: fold
       into staging and document, updating §5's table via a footnote in the README).
-- [ ] `int_interchange_revenue` — approved, deduped auths × `interchange_rate_bps` →
+- [x] `int_interchange_revenue` — approved, deduped auths × `interchange_rate_bps` →
       `interchange_revenue_minor` (integer bps math, no floats).
-- [ ] `int_activation_funnel` — per customer: `signup_ts`, min verified ts, first funding
+- [x] `int_activation_funnel` — per customer: `signup_ts`, min verified ts, first funding
       posting ts, first outbound txn ts (from ledger), as one wide row.
-- [ ] `int_daily_active_users` — `uniqExact(customer_id)` per day from `stg_app_events`;
+- [x] `int_daily_active_users` — `uniqExact(customer_id)` per day from `stg_app_events`;
       materialize as **table** (10M-row scan feeding multiple metrics).
 
 **C. Tests-as-you-go**
 
-- [ ] `unique`/`not_null` keys on every model; `accepted_values` on statuses;
+- [x] `unique`/`not_null` keys on every model; `accepted_values` on statuses;
       dedup uniqueness (`auth_id` unique post-staging) as a schema test now (formalized as the
       invariant suite in P7).
 
 ### Acceptance criteria
 
-- [ ] `make wh-build && make wh-test` green in-cluster (full DAG ≈ 25+ models).
-- [ ] **SCD2 spot check** (one sampled customer with ≥2 KYC events): intervals contiguous
+- [x] `make wh-build && make wh-test` green in-cluster (full DAG ≈ 25+ models).
+- [x] **SCD2 spot check** (one sampled customer with ≥2 KYC events): intervals contiguous
       (each `valid_to` = next `valid_from`), no overlap, exactly one open interval.
-- [ ] **Dedup:** `count() = uniqExact(auth_id)` in the deduped relation, while bronze still has
+- [x] **Dedup:** `count() = uniqExact(auth_id)` in the deduped relation, while bronze still has
       the ~3% dupes.
-- [ ] **Funnel monotonicity** holds for all customers (spot query; formal test in P7).
-- [ ] `int_daily_active_users` covers every day in the 18-month window with plausible DAU
+- [x] **Funnel monotonicity** holds for all customers (spot query; formal test in P7).
+- [x] `int_daily_active_users` covers every day in the 18-month window with plausible DAU
       (no zero-gaps unless genuinely quiet days exist at small scale).
 
 ---
@@ -442,53 +442,141 @@ teaching-value logic (dedup, SCD2, funnel, DAU, interchange).
 
 ---
 
-## P6 — Metrics layer + real-time showcase
+## P6 — Real-time restructure (lambda)
 
-**Goal:** the four metric marts of §6 plus the locked AggregatingMergeTree + MATERIALIZED VIEW
-near-real-time interchange rollup, reconciled against batch.
+**Goal:** restructure the warehouse to follow
+[`realtime-warehouse-architecture.md`](realtime-warehouse-architecture.md) — the medallion
+transformation runs **continuously inside ClickHouse** as a materialized-view cascade
+(`nimbus_stream` silver + `nimbus_rt` gold), dbt splits into a **control plane** (deploys/versions
+the streaming objects) and the **batch spine** (SCD2, cohorts, as-of facts — unchanged), and a
+watermarked reconciliation test binds the two planes. This phase folds the realtime doc's
+P-RT0…P-RT5 into six sub-phases A–F, and absorbs the parts of the old P6 (batch metric marts)
+that now serve as the **batch truth** side of the lambda. Section references (§N) below point at
+the realtime doc.
 
-**Prerequisites:** P5.
+**Decisions resolved from the realtime doc's §10 open questions (recorded here):**
+
+1. **Scope** — full build through reconciliation (all six sub-phases), not just the flagship slice.
+2. **Serving proof** — `make wh-demo-realtime` (insert → `sumMerge` advances, zero dbt). A Grafana
+   dashboard is a documented future extension, not P6.
+3. **T2 mechanism** — refreshable MV *if* the sub-phase A spike proves it on Replicated targets on
+   26.3; otherwise the **micro-batch dbt CronJob** fallback (HA-preserving, zero new mechanism).
+
+**Prerequisites:** P5. Existing `nimbus_staging/_intermediate/_marts/_metrics` and the P3 runtime
+are untouched throughout — `make ch-demo` and `make wh-build` stay green as canaries.
 
 ### Tasks
 
-**A. Batch metrics (`models/metrics/`)**
+**A. Foundations + keystone spike (≙ P-RT0)**
 
-- [ ] `metrics_finance_daily` — completed per §6: deposits, avg balance/customer,
-      interchange + fee + interest revenue, `total_revenue`, `arpu`. Grain: day. Documented
-      formula per column in `schema.yml` (**the metric definitions are the contract**, §7).
-- [ ] `metrics_growth_daily` — signups, kyc_verified, funded, first_txn, `activation_rate`,
-      `dau`, `mau` (28-day rolling `uniq` over app events — window or self-join over
-      `int_daily_active_users`' source), `stickiness`.
-- [ ] `metrics_risk_daily` — auth_count, decline_rate, fraud_rate, chargeback_rate (chargebacks
-      approximated from a ledger category — note the simplification).
-- [ ] `cohorts_retention` — cohort_month = first funding month; activity from ledger/app
-      events; months_since × retained_accounts × rate.
+- [x] **Grants gap (must land first):** the CHI `dbt/grants/query` block enumerates databases
+      *explicitly* — `nimbus_stream`/`nimbus_rt` are **not** covered by any prefix wildcard. Add
+      `GRANT ALL ON nimbus_stream.*` + `GRANT ALL ON nimbus_rt.*` to
+      `kubernetes/analytics/clickhouse/base/clickhouse.yaml`; deploy via
+      `make fluxcd-push-artifacts`.
+- [x] `warehouse/loaders/30_create_rt.sql` — `CREATE DATABASE IF NOT EXISTS nimbus_stream|nimbus_rt
+      ON CLUSTER '{cluster}'` (admin bootstrap, same pattern as `00_create_raw.sql`); wire into
+      `wh-bronze` or a new `wh-rt-init`.
+- [x] `generate_schema_name` mapping: `models/stream/` → `nimbus_stream`, `models/rt/` →
+      `nimbus_rt`; all P6 models carry `tags: ['rt']` (the control-plane selector, sub-phase F).
+- [x] **Spike model** `models/rt/rt_smoke.sql` — dbt `materialized_view` materialization
+      (adapter 1.10.1) over a trivial source, target `ReplicatedAggregatingMergeTree` `ON CLUSTER`.
+      Validate and record in `warehouse/README.md`:
+      - **(a) single-fire keystone (§2):** insert a block on pod 0 → MV output part appears on
+        *both* pods with the event counted **exactly once** (fetched parts don't re-fire MVs);
+        repeat with an insert through the service (either replica may receive it);
+      - **(b) `catchup` semantics:** what the adapter's backfill-on-create does on 26.3, and
+        whether `dbt run` on a changed MV takes the in-place `MODIFY QUERY` path (no drop);
+      - **(c) T2 verdict:** does a refreshable MV work against a Replicated target on 26.3
+        (upstream issue #84134)? Record the verdict; it selects sub-phase E's mechanism.
 
-**B. Real-time showcase**
+**B. Flagship slice — live interchange revenue (≙ P-RT1)**
 
-- [ ] `models/metrics/rt_interchange_daily_target.sql` — dbt `table` with explicit engine
-      `AggregatingMergeTree`, `ORDER BY date`, columns `date`,
-      `interchange_minor AggregateFunction(sum, UInt64)`, `auth_count AggregateFunction(count)`.
-- [ ] `models/metrics/rt_interchange_mv.sql` — dbt `materialized_view` materialization
-      (dbt-clickhouse supports it — validate version) reading from the **deduped card-auth
-      relation's physical table** with `sumState(...)`/`countState()` group by day, writing into
-      the target. Note the honest caveat in comments: the MV fires on *new inserts* only —
-      which is exactly the demo.
-- [ ] `wh-demo-realtime` make target — inserts a handful of fresh approved auths for *today*
-      into bronze **and** the deduped physical table path the MV watches, then queries
-      `sumMerge(interchange_minor)` for today twice (before/after) showing the rollup advance
-      **without any dbt run**; prints the comparison.
+- [x] `models/rt/mcc_dict.sql` + `models/rt/category_dict.sql` — dbt `dictionary`
+      materializations over `seed_mcc_codes` / `seed_transaction_categories` (**dictionaries, not
+      joins** — an MV only fires off its left-most table, §3/§6).
+- [x] `models/rt/rt_interchange_daily.sql` — target `ReplicatedAggregatingMergeTree`,
+      `ORDER BY (day, merchant_category)`, columns `interchange_minor AggregateFunction(sum, Int64)`,
+      `auth_count AggregateFunction(count)`; MV over `nimbus_raw.raw_card_authorizations`
+      (`WHERE approved = 1`): `sumState(amount_minor * dictGet(..., 'interchange_rate_bps', mcc)
+      div 10000)` — integer bps math, evaluated per inserted block.
+- [x] **Controlled backfill** of the ~1M historical auths already in bronze (MVs never fire
+      retroactively): prefer the adapter's `catchup`; fallback manual
+      `INSERT INTO target SELECT ... -State ... FROM bronze` (never `POPULATE` — it drops
+      concurrent inserts).
+- [x] `wh-demo-realtime` make target — insert a handful of fresh approved auths for *today* into
+      **bronze only**, query `sumMerge(interchange_minor)` for today before/after: the rollup
+      advances **with zero dbt involvement**; prints the comparison + elapsed time.
+
+**C. Silver stream + honest dedup (≙ P-RT2)**
+
+- [x] `models/stream/auth_fanin.sql` — `Null`-engine fan-in: one MV `bronze → auth_fanin`, then
+      parallel MVs `auth_fanin → {rt_interchange_daily, rt_risk_daily, slv_card_auths}` — cascade
+      depth stays ≤2, no deep chain in the insert path (§6); re-point B's MV accordingly.
+- [x] `models/stream/slv_card_auths.sql` — `ReplicatedReplacingMergeTree(ingested_at)`
+      `ORDER BY auth_id`: the **corrected** (deduped) auth stream; reads via `argMax`/`FINAL`,
+      never `FINAL` on the hot path. Backfill from bronze.
+- [x] `models/stream/slv_ledger_postings.sql` — typed/signed 1:1 + `dictGet(category_dict, …)`
+      enrichment at insert time; `models/stream/slv_app_events.sql` — typed/renamed. Backfills.
+- [x] The ~3% bronze dupes now demonstrate the **at-least-once tradeoff** (§6): the fast T0
+      rollup double-counts them *by design*; the corrected path resolves them. Both numbers ship.
+
+**D. Gold rollups (≙ P-RT3)**
+
+- [x] `models/rt/rt_risk_daily.sql` — `countState` auths / declines / fraud by day (via fan-in).
+- [x] `models/rt/rt_finance_daily.sql` — `sumState` deposits by day from `slv_ledger_postings`'s
+      insert stream.
+- [x] `models/rt/rt_dau_daily.sql` — `uniqState(customer_id)` by day over the app-event stream.
+- [x] `models/rt/rt_balance_delta_daily.sql` — `sumState(signed_amount_minor)` by account × day;
+      the **cumulative** balance is a *query-time* window over the deltas (a window over all
+      history cannot stream, §3) — the query documented in the model's yml.
+- [x] Backfills month-wise if the 1.5 GiB `max_memory_usage` bites (same mitigation as P1).
+
+**E. T2 layer + batch truth (≙ P-RT4, absorbs old-P6 metrics)**
+
+- [x] `models/rt/rt_activation_funnel.sql` — per sub-phase A's verdict: **refreshable MV**
+      (`refreshable={"interval": "EVERY 5 MINUTE"}`) or the **micro-batch CronJob** fallback (a
+      third suspended CronJob running `dbt run --select rt_activation_funnel` every 5 min).
+- [x] Complete the **batch-truth metrics** (the lambda's source-of-truth side, old P6-A):
+      `metrics_finance_daily` full (interchange + fee + interest revenue, `total_revenue`, `arpu`),
+      `metrics_growth_daily` (activation, dau/mau/stickiness), `metrics_risk_daily` — formulas
+      documented per column; these are what the stream reconciles against.
+      (`cohorts_retention` moves to P7 — batch-only, no realtime counterpart.)
+
+**F. Lambda contract — reconciliation + control-plane split (≙ P-RT5)**
+
+- [x] **Run-mode split (§5):** batch CronJobs run `dbt build --exclude tag:rt` (the spine);
+      a new suspended CronJob `dbt-deployer` runs `dbt run --select tag:rt` (deploy streaming
+      objects, **on change only** — triggered by `make wh-deploy`, same zero-tooling pattern as
+      `dbt-tester`). Verify a deploy run on an unchanged project is a no-op (`MODIFY QUERY`
+      path, MVs keep running — no drop/recreate).
+- [x] **`--full-refresh` guard** documented in `warehouse/README.md`: it drops/recreates live MVs
+      (inserts during the window are silently lost) — maintenance windows only, ingestion paused.
+- [x] `tests/assert_rt_batch_reconciliation.sql` — **watermarked to closed days** (`day < today`;
+      you can't test a moving target): `|corrected_stream(d) − batch(d)| == 0` (error), and the
+      `fast(d) − batch(d)` dup-drift **reported** via a warn-severity test (surfaced, not hidden).
+- [x] Observability: `system.query_views_log` (MV fires/timing/exceptions) +
+      `system.view_refreshes` (RMV status) queries added to `wh-debug`; Prometheus scrape already
+      in place.
 
 ### Acceptance criteria
 
-- [ ] `make wh-build && make wh-test` green.
-- [ ] **Reconciliation:** `metrics_finance_daily.interchange_revenue` per day ==
-      `sumMerge` from the RT target for fully-loaded days == direct aggregate off
-      `fct_card_authorizations` (three-way check; becomes a P7 test).
-- [ ] `make wh-demo-realtime` visibly bumps today's rollup with zero dbt involvement.
-- [ ] `metrics_growth_daily` sanity: `mau ≥ dau`, `0 < stickiness ≤ 1`, activation_rate matches
-      funnel counts on a sampled week.
-- [ ] Cohort matrix is monotonically non-increasing along `months_since_funding`.
+- [x] **Keystone:** sub-phase A validations recorded; identical `sumMerge` totals on both
+      replicas after inserts on either pod.
+- [x] `make wh-demo-realtime` — fresh bronze insert visible in `rt_interchange_daily` within
+      seconds, zero dbt runs, printed proof.
+- [x] **Dedup honesty:** corrected stream unique on `auth_id`; bronze still holds the ~3% dupes;
+      fast-vs-corrected drift ≈ the dupe rate on affected days.
+- [x] **Reconciliation green:** corrected stream == batch metrics on all closed days (interchange,
+      risk counts, DAU); drift report shows fast-path over-count only where dupes exist.
+- [x] **Plane isolation:** `make wh-build` (batch spine) touches no `nimbus_stream`/`nimbus_rt`
+      object; `make wh-deploy` on an unchanged project is a no-op; both green in-cluster.
+- [x] Old-P6 sanity retained: `mau ≥ dau`, `0 < stickiness ≤ 1`, activation matches funnel counts
+      on a sampled week.
+- [x] `system.replicas` clean; all stream/rt tables present on both replicas.
+
+**Out of scope:** ingestion changes (bronze stays the boundary, §0), Grafana serving (documented
+extension), `cohorts_retention` (P7).
 
 ---
 
@@ -510,7 +598,15 @@ documentation; `make wh-all` proves the whole thing from a fresh cluster.
 - [ ] `assert_funnel_monotonicity.sql`.
 - [ ] `assert_dedup_effective.sql` — deduped relation unique on `auth_id` **and** bronze
       dupe-count > 0 (proves the demo is real, not vacuous).
-- [ ] `assert_rt_batch_reconciliation.sql` — the three-way interchange check from P6.
+- [ ] Harden `assert_rt_batch_reconciliation.sql` (created in P6-F) into the **three-way** check:
+      corrected stream == batch metric == direct aggregate off `fct_card_authorizations`,
+      per closed day.
+
+**A2. Cohorts (moved from old P6 — batch-only, no realtime counterpart)**
+
+- [ ] `models/metrics/cohorts_retention.sql` — cohort_month = first funding month; activity from
+      ledger/app events; months_since × retained_accounts × rate.
+- [ ] Cohort matrix monotonically non-increasing along `months_since_funding` (test).
 
 **B. Docs & lineage**
 
@@ -520,11 +616,13 @@ documentation; `make wh-all` proves the whole thing from a fresh cluster.
 
 **C. READMEs & final glue**
 
-- [ ] `warehouse/README.md` — the full walkthrough: scenario recap, layer map (link to
-      architecture doc), how to run (in-cluster contract + dev loop), the P0 spike findings,
-      the invariants, the real-time demo, known simplifications.
-- [ ] Root `README.md` — new "Data warehouse (dbt + medallion)" section: what it adds, the
-      3-command demo (`make wh-all`, `make wh-demo-realtime`, `make wh-docs`), link to both docs.
+- [ ] `warehouse/README.md` — the full walkthrough: scenario recap, layer map (link to both
+      architecture docs), how to run (in-cluster contract + dev loop + the P6 deploy/build
+      run-mode split), the P0 **and P6-A** spike findings, the invariants, the real-time demo,
+      the `--full-refresh` guard, known simplifications.
+- [ ] Root `README.md` — new "Data warehouse (dbt + medallion + realtime lambda)" section: what
+      it adds, the 3-command demo (`make wh-all`, `make wh-demo-realtime`, `make wh-docs`),
+      link to all three docs.
 - [ ] `make wh-all` finalized: `wh-image → wh-bronze → wh-generate → wh-build → wh-test`,
       idempotent, with a closing summary (row counts, test results).
 - [ ] Update `docs/warehouse-architecture.md` status line → "implemented"; tick all boxes here.
@@ -554,9 +652,15 @@ phase leaves `main` in a demonstrably working state (its acceptance criteria are
 | `kubectl create job --from=cronjob` can't override args for `wh-test` | P3 | Second suspended CronJob (`dbt-tester`) — zero extra tooling |
 | dbt-clickhouse `materialized_view` materialization quirks | P6 | Fallback = target table as dbt model + MV via a `run_operation`/pre-hook `CREATE MATERIALIZED VIEW` |
 | Registry mirror path mismatch for the runner image | P3 | Reference `k3d-local-dev-registry:5000/...` directly in the manifest |
+| Refreshable MV broken on Replicated targets on 26.3 (upstream #84134) | P6-A/E | Spike verdict gates it; fallback = micro-batch CronJob (`dbt run --select rt_activation_funnel` every 5 min) — same T2 freshness, HA-preserving |
+| CHI `<grants>` doesn't cover the new DBs (explicit per-DB list, no prefix wildcard) | P6-A | Land the two new `GRANT ALL` lines *before* any dbt deploy touches `nimbus_stream`/`nimbus_rt` |
+| `--full-refresh` drops a live MV → silent data gap during the window | P6-F | Documented guard: maintenance windows only, ingestion paused; normal deploys use the `MODIFY QUERY` path |
+| Adapter `catchup` backfill semantics differ from assumption | P6-A/B | Spike validates; fallback = manual `INSERT INTO target SELECT …-State… FROM bronze` (never `POPULATE`) |
+| Backfill memory vs 1.5 GiB `max_memory_usage` (10M app events → `uniqState`) | P6-D | Month-wise backfill loop (same mitigation as P1/P5) |
 
 **Rollback.** Every phase is purely additive to the existing stack. Full teardown of the
 warehouse without touching ClickHouse/Keeper/Flux:
-`DROP DATABASE nimbus_raw|nimbus_staging|nimbus_intermediate|nimbus_marts|nimbus_metrics ON CLUSTER '{cluster}'`,
-plus removing the `dbt-runner` Kustomization. The existing `make ch-demo` path stays untouched
+`DROP DATABASE nimbus_raw|nimbus_staging|nimbus_intermediate|nimbus_marts|nimbus_metrics|nimbus_stream|nimbus_rt ON CLUSTER '{cluster}'`,
+plus removing the `dbt-runner` Kustomization. (Dropping a database also drops its MVs — the
+streaming plane tears down with it; bronze inserts simply stop fanning out.) The existing `make ch-demo` path stays untouched
 throughout and doubles as the canary that the base stack is unharmed.

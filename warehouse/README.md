@@ -405,6 +405,94 @@ meant to catch.
 
 ---
 
+## P6 — real-time restructure (lambda)
+
+P6 turns the streamable slice of the medallion into a **materialized-view cascade** that runs
+continuously *inside* ClickHouse — bronze → `nimbus_stream` (silver) → `nimbus_rt` (gold) — fresh
+within seconds of a bronze insert and with **zero dbt at runtime**. dbt becomes the *control plane*
+that deploys/versions the streaming objects (`dbt run --select tag:rt`); the existing batch layer is
+retained untouched as the correctness/history spine and a watermarked reconciliation test binds the
+two. Full design: [`../docs/realtime-warehouse-architecture.md`]; task breakdown:
+[`../docs/warehouse-architecture-plan.md`] §P6. Built as sub-phases A–F.
+
+### P6-A keystone spike findings (`models/rt/rt_smoke.sql`)
+
+The three questions that gate everything after, validated on ClickHouse `26.3.16` / adapter
+`1.10.1` before any real model was built. `rt_smoke` is a standard-mode dbt `materialized_view`:
+dbt creates a target table `nimbus_rt.rt_smoke` (`ReplicatedAggregatingMergeTree`, `auth_count
+AggregateFunction(count)` inferred from `countState()`) **and** the view `nimbus_rt.rt_smoke_mv`
+(`TO nimbus_rt.rt_smoke`), both `ON CLUSTER`, on both pods.
+
+**(a) Single-fire replication keystone — CONFIRMED.** With the target empty (`catchup=false`),
+inserting 1000 auths **on pod-0 only** left *exactly* 1000 in the rollup on **both** replicas (not
+2000), and another 500 through the service left *exactly* 1500 on both. An MV fires on the receiving
+replica's `INSERT`; the bronze source part **and** the MV-output part then replicate as ordinary
+parts, and the other replica does **not** re-fire the MV on a fetched part → **each event is
+aggregated exactly once**, HA preserved. This is the correctness foundation for the whole cascade on
+this 1-shard × 2-replica topology.
+
+**(b) In-place evolution — CONFIRMED (`MODIFY QUERY`, no drop).** Re-deploying `rt_smoke` with a
+changed `SELECT` took the `ALTER TABLE rt_smoke_mv MODIFY QUERY …` path: the target table's `uuid`
+was **unchanged**, its rows were **preserved**, and the live view definition picked up the new
+predicate. So a routine `dbt run` on a changed MV evolves it in place with no gap — the basis for the
+"deploy on change is safe / an unchanged deploy is a no-op" contract (P6-F). (`catchup=true`, used by
+the real rollups in P6-B+, backfills the target from bronze at create time via `CREATE TABLE … AS
+SELECT` — never `POPULATE`.)
+
+**(c) Refreshable MV on a Replicated target — NOT VIABLE here → micro-batch fallback selected.**
+`CREATE MATERIALIZED VIEW … REFRESH EVERY … TO <ReplicatedMergeTree>` is **refused by the server**:
+
+> `Code: 36 … This combination doesn't work: refreshable materialized view, no APPEND,
+> non-replicated database, replicated table. Each refresh would replace the replicated table
+> locally, but other replicas wouldn't see it. Refusing to create.`
+
+Our databases are `Atomic` (non-replicated) with `Replicated` tables, so a REPLACE-semantics RMV
+can't coordinate across replicas (the essence of upstream #84134). Making it work would require
+either a `Replicated`-engine database (not how the operator provisions this cluster) or a
+non-replicated target (loses HA). **Verdict:** the T2 layer (`rt_activation_funnel`, P6-E) uses the
+**micro-batch dbt CronJob** fallback — same minutes-tier freshness, HA-preserving, zero new
+mechanism.
+
+### Run modes — deploy (control plane) vs build (batch spine)
+
+P6 splits dbt into two run modes off the **same** `dbt-runner` image (four suspended CronJobs, all
+driven by `make` — the P3 zero-templating pattern):
+
+| Mode | CronJob / make | Command | Scope |
+| --- | --- | --- | --- |
+| **Deploy** streaming objects | `dbt-deployer` / `make wh-deploy` | `dbt run --select tag:rt` | `nimbus_stream` + `nimbus_rt` MVs, dicts, targets — on change |
+| **Build** batch spine | `dbt-runner` / `make wh-build` | `dbt build --exclude tag:rt` | `nimbus_staging/_intermediate/_marts/_metrics` + reconciliation tests |
+| **Test** batch spine | `dbt-tester` / `make wh-test` | `dbt test --exclude tag:rt` | batch tests incl. the watermarked reconciliation |
+| **Refresh** T2 | `dbt-refresher` / `make wh-refresh` | `dbt run --select rt_activation_funnel` | the micro-batch funnel (un-suspend for the 5-min cadence) |
+
+The `tag:rt` selector is the seam: **plane isolation** means `make wh-build` never touches a
+`nimbus_stream`/`nimbus_rt` object, and a `make wh-deploy` on an unchanged project is a **no-op**
+(every MV takes the in-place `MODIFY QUERY` path — nothing is dropped, live MVs keep firing).
+
+Backfill of the fan-in-fed targets (interchange / risk / deduped silver, which read the Null
+`auth_fanin` and so start empty) is a controlled replay of bronze **through** the fan-in:
+`make wh-rt-backfill` (never `POPULATE`). The silver-fed rollups (finance/dau/balance) self-backfill
+via the adapter's `catchup` at deploy.
+
+### ⚠️ `--full-refresh` is destructive to a live MV — maintenance windows only
+
+A normal deploy uses `ALTER TABLE … MODIFY QUERY` (in place, no gap). **`dbt run --full-refresh
+--select tag:rt` DROPS and recreates** each MV and its target table — any bronze insert that lands
+during that window is **silently lost** (no MV exists to fan it out), and an AggregatingMergeTree
+target is rebuilt from scratch. Only ever `--full-refresh` the streaming plane in a **maintenance
+window with ingestion paused**. Routine change → plain `make wh-deploy` (MODIFY QUERY). The
+`dbt-deployer` CronJob deliberately runs `dbt run` (never `dbt build --full-refresh`) for this reason.
+
+### Real-time demo & observability
+
+- `make wh-demo-realtime` — insert a handful of approved auths into **bronze only**; the interchange
+  rollup advances within ~1s with **zero dbt runs** (printed before/after/delta proof).
+- `make wh-debug` — prints `system.query_views_log` (which MVs fired, timing, exceptions),
+  `system.view_refreshes` (empty — the T2 fallback uses no refreshable MVs), and stream/rt replica
+  health.
+
+---
+
 ## P0 spike findings — `dbt-clickhouse` + `ON CLUSTER` + replication
 
 The whole point of P0 was to *validate* how the adapter drives a replicated cluster and how a

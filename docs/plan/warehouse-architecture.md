@@ -327,8 +327,8 @@ The new `dbt` artifact is added to the Flux dependency chain after `clickhouse-c
 | **P3** | **In-cluster runtime:** `dbt-runner` image + `make wh-image`; Job + CronJob under `kubernetes/analytics/dbt/`, wired into Flux (`dependsOn` clickhouse-chi). `make wh-build`/`wh-test` run in-cluster. This is the v1 delivery contract. |
 | **P4** | Full silver: all staging (with dedup) + intermediate (SCD2, funnel, DAU, interchange). |
 | **P5** | Full gold star schema: all `dim_*` (SCD2) + `fct_*`. |
-| **P6** | Metrics marts + retention cohorts + the **AggregatingMergeTree + materialized-view** real-time interchange rollup. |
-| **P7** | Data tests (generic + fintech invariants incl. streaming-vs-batch reconciliation), `dbt docs`, exposures, README. |
+| **P6** | **Superseded — real-time restructure (lambda)** per [`realtime-warehouse-architecture.md`](realtime-warehouse-architecture.md): the medallion runs continuously as a ClickHouse MV cascade (`nimbus_stream`/`nimbus_rt`), dbt splits into control plane + batch spine, batch-truth metrics land here. Replaces the single-rollup showcase originally planned. |
+| **P7** | Data tests (generic + fintech invariants incl. streaming-vs-batch reconciliation), retention cohorts, `dbt docs`, exposures, README. |
 
 > The in-cluster Job (P3) lands right after the vertical slice so the GitOps runtime is proven early on
 > a small DAG, then the model library grows underneath a runtime that already works. Host-run (P0)
@@ -344,5 +344,7 @@ The new `dbt` artifact is added to the Flux dependency chain after `clickhouse-c
    Enough to exercise incremental models and feel real; fits the 3-node k3d cluster. → §8, P1.
 3. **dbt user** — **dedicated least-privilege `dbt`** ClickHouse user + grants on `nimbus_*`, password
    from a `dbt-credentials` Secret. Not `admin`. → §9, P0.
-4. **Real-time metrics** — **included**: `AggregatingMergeTree` target + incremental `MATERIALIZED
-   VIEW` for interchange revenue, reconciled against the batch metric by a data test. → §6, §10, P6/P7.
+4. **Real-time metrics** — **superseded and expanded** (2026-07): the single showcase rollup grew
+   into a full real-time serving plane — see
+   [`realtime-warehouse-architecture.md`](realtime-warehouse-architecture.md) (lambda: MV-cascade
+   serving + this batch layer as the correctness spine, bound by reconciliation tests). → P6.

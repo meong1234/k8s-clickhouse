@@ -1,0 +1,61 @@
+---
+# dbt-refresher — the T2 micro-batch layer of the lambda (P6-E fallback, P6-F wiring).
+#
+# The activation funnel is a multi-source history-spanning join that cannot be a T0
+# incremental MV, and the P6-A spike proved the T2 alternative — a refreshable MV — is
+# REFUSED on this cluster (Replicated target + non-replicated database, ClickHouse
+# #84134; see the README P6-A findings). So the HA-preserving fallback is this micro-batch
+# CronJob: it re-runs ONLY `dbt run --select rt_activation_funnel` on a short interval,
+# giving the same minutes-tier freshness with zero new mechanism.
+#
+# Unlike dbt-runner/tester/deployer (driven on-change), this one is genuinely PERIODIC:
+# un-suspend it to get a 5-minute refresh. It ships SUSPENDED like the rest so nothing runs
+# unattended in the local/CI cluster by default; `make wh-refresh` triggers one refresh,
+# and flipping suspend:false (or an overlay) turns on the 5-minute cadence.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dbt-refresher
+  namespace: clickhouse
+  labels:
+    app: dbt-refresher
+spec:
+  schedule: "*/5 * * * *"      # T2 cadence: every 5 minutes (active only when un-suspended)
+  suspend: true
+  concurrencyPolicy: Forbid    # never overlap two refreshes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: dbt-refresher
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: dbt
+              image: k3d-local-dev-registry:5000/nimbus/dbt-runner:local
+              imagePullPolicy: Always
+              # Only the T2 model. It is tag:rt, so it is also (re)deployed by dbt-deployer;
+              # here it is REFRESHED (recomputed) on the T2 cadence.
+              command: ["dbt", "run", "--select", "rt_activation_funnel"]
+              env:
+                - name: NIMBUS_CH_HOST
+                  value: clickhouse-clickhouse
+                - name: NIMBUS_CH_CLUSTER
+                  value: default
+                - name: NIMBUS_CH_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dbt-credentials
+                      key: dbt_password
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

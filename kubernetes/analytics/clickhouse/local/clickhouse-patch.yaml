@@ -19,18 +19,25 @@
                   values:
                     - clickhouse
             topologyKey: kubernetes.io/hostname
+# Memory: the k3d nodes have 16 GiB each, so the earlier 1536Mi cap was purely a
+# "laptop realism" choice, not a host limit. It proved too tight to run the full batch
+# suite + the P6 real-time cascade together (background merges pin RSS at the cap and
+# tiny seed inserts / SCD2 test bursts OOM). Raised to 4Gi (operator derives
+# max_server_memory_usage = 0.9 x limit = ~3.6 GiB), which comfortably fits the batch
+# spine, the streaming MV cascade, and the watermarked reconciliation. Still bounded
+# (this is a laptop, not prod) and fully local — base/prod keeps the production sizing.
 - op: replace
   path: /spec/templates/podTemplates/0/spec/containers/0/resources
   value:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 1Gi
     limits:
-      memory: 1536Mi
+      memory: 4Gi
 
 # Background-merge memory safety (laptop overlay only; base/prod keeps ClickHouse
-# defaults). The operator derives max_server_memory_usage = 0.9 x the 1536Mi limit
-# = ~1.35 GiB server-wide. Bulk-loading the laptop-real bronze (~2M ledger + 10M app
+# defaults). Even with the 4Gi limit above (~3.6 GiB server-wide), keeping each merge
+# cheap is still worthwhile. Bulk-loading the laptop-real bronze (~2M ledger + 10M app
 # events + 1M auths, all PARTITION BY toYYYYMM over 18 months) spawns many background
 # merges; with the default merge_max_block_size=8192 a single merge of the wide
 # LowCardinality rows can want 600+ MiB, and enough of them at once pin RSS at the cap

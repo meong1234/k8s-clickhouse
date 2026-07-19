@@ -4,8 +4,9 @@
 # defined in scripts/clickhouse.mk and shared via `include scripts/*`.
 
 .PHONY: warehouse-help wh-setup wh-portforward wh-debug wh-build-local wh-test-local \
-        wh-bronze wh-generate wh-seed wh-counts wh-drop \
-        wh-image wh-build wh-test wh-logs wh-all
+        wh-bronze wh-rt-init wh-generate wh-seed wh-counts wh-drop \
+        wh-image wh-build wh-test wh-logs wh-all \
+        wh-deploy wh-refresh wh-demo-realtime wh-rt-backfill
 
 # Project layout
 WH_DIR            ?= warehouse
@@ -143,9 +144,19 @@ wh-portforward:
 	@echo "==> Port-forwarding svc/$(WH_CH_SVC) 8123 -> localhost:8123 (Ctrl-C to stop)..."
 	@kubectl -n $(CH_NAMESPACE) port-forward svc/$(WH_CH_SVC) 8123:8123
 
-# Verify dbt can reach ClickHouse as the scoped `dbt` user.
+# Verify dbt can reach ClickHouse as the scoped `dbt` user, then print P6 streaming-plane
+# observability: which MVs fired (timing/exceptions), refreshable-MV status (empty here —
+# the T2 layer uses the micro-batch fallback), and stream/rt replica health.
 wh-debug:
 	@$(DBT) debug --project-dir $(DBT_DIR) --profiles-dir $(DBT_PROFILES_DIR)
+	@echo ""
+	@echo "==> P6 streaming-plane observability:"
+	@echo "--- MV fires (system.query_views_log, last 1h) ---"
+	@$(CH_EXEC) -q "SELECT view_name, count() AS fires, round(avg(view_duration_ms),1) AS avg_ms, countIf(exception != '') AS errors FROM system.query_views_log WHERE event_time > now() - INTERVAL 1 HOUR AND view_name LIKE 'nimbus_%' GROUP BY view_name ORDER BY view_name FORMAT PrettyCompact" 2>/dev/null || echo "  (no query_views_log rows yet)"
+	@echo "--- refreshable MV status (system.view_refreshes; empty = T2 micro-batch fallback in use) ---"
+	@$(CH_EXEC) -q "SELECT database, view, status FROM system.view_refreshes FORMAT PrettyCompact" 2>/dev/null || echo "  (none)"
+	@echo "--- streaming-plane replica health (system.replicas) ---"
+	@$(CH_EXEC) -q "SELECT database, table, is_readonly, total_replicas AS total, active_replicas AS active FROM system.replicas WHERE database IN ('nimbus_stream','nimbus_rt') ORDER BY database, table FORMAT PrettyCompact" 2>/dev/null || true
 
 # Build all models (host, against the port-forwarded ClickHouse).
 wh-build-local:
@@ -159,11 +170,21 @@ wh-test-local:
 
 # Create the nimbus_* databases + the 8 bronze tables ON CLUSTER. Idempotent
 # (everything is IF NOT EXISTS). Run as admin: this is DDL bootstrap, not a dbt model.
-wh-bronze:
+wh-bronze: wh-rt-init
 	@echo "==> Applying bronze DDL ON CLUSTER '$(CH_CLUSTER)' (as $(CH_USER))..."
 	@cat $(WH_LOADERS)/00_create_raw.sql | $(CH_EXEC_I) --multiquery
 	@echo "==> Bronze tables in nimbus_raw:"
 	@$(CH_EXEC) -q "SELECT name, engine FROM system.tables WHERE database='nimbus_raw' ORDER BY name FORMAT PrettyCompact"
+
+# --- P6: real-time streaming-plane databases (nimbus_stream, nimbus_rt) -----------
+# Admin DDL bootstrap (same pattern as wh-bronze): create the two lambda "speed layer"
+# databases ON CLUSTER. Idempotent (IF NOT EXISTS). dbt owns the OBJECTS inside them
+# (MVs, target tables, dictionaries) via `make wh-deploy`; this only owns the databases.
+# Run standalone (`make wh-rt-init`) or implicitly as a prerequisite of wh-bronze.
+wh-rt-init:
+	@echo "==> Creating streaming-plane databases ON CLUSTER '$(CH_CLUSTER)' (as $(CH_USER))..."
+	@cat $(WH_LOADERS)/30_create_rt.sql | $(CH_EXEC_I) --multiquery
+	@$(CH_EXEC) -q "SELECT name, engine FROM system.databases WHERE name IN ('nimbus_stream','nimbus_rt') ORDER BY name FORMAT PrettyCompact"
 
 # Truncate all bronze tables (keeps schema) — makes wh-generate re-runnable and the
 # Python-tier checksum deterministic across reloads.
@@ -224,10 +245,23 @@ wh-image:
 wh-build:
 	@$(call wh_run_job,dbt-runner,dbt-build)
 
-# Same, but from the dbt-tester CronJob (which runs `dbt test`). A separate CronJob is
-# used because `kubectl create job --from=cronjob` cannot override the container command.
+# Same, but from the dbt-tester CronJob (which runs `dbt test --exclude tag:rt`). A separate
+# CronJob is used because `kubectl create job --from=cronjob` cannot override the command.
 wh-test:
 	@$(call wh_run_job,dbt-tester,dbt-test)
+
+# --- P6 control plane: deploy the streaming plane / refresh the T2 layer ------------
+# wh-deploy: run `dbt run --select tag:rt` in-cluster (Job from the suspended dbt-deployer
+# CronJob) — creates/evolves every nimbus_stream + nimbus_rt object in place (MODIFY QUERY).
+# Run it on CHANGE to the rt models; on an unchanged project it is a no-op (live MVs keep
+# firing). Same zero-templating drive path as wh-build/wh-test.
+wh-deploy:
+	@$(call wh_run_job,dbt-deployer,dbt-deploy)
+
+# wh-refresh: trigger ONE T2 micro-batch refresh of rt_activation_funnel (Job from the
+# suspended dbt-refresher CronJob). Un-suspend that CronJob for the automatic 5-min cadence.
+wh-refresh:
+	@$(call wh_run_job,dbt-refresher,dbt-refresh)
 
 # Tail logs of the most recent dbt-runner pod(s). Override the selector with JOB=<name>
 # to target a specific Job (e.g. a dbt-test-* run); label app=dbt-tester for the tester.
@@ -244,3 +278,47 @@ wh-logs:
 # then run the build and tests in-cluster. First-version convenience target.
 wh-all: wh-image wh-bronze wh-generate wh-build wh-test
 	@echo "==> wh-all complete: image built, bronze loaded, in-cluster build + tests green."
+
+# --- P6: real-time serving proof --------------------------------------------------
+# Insert a handful of fresh APPROVED auths for TODAY into BRONZE ONLY, then read the
+# gold rollup before/after. The interchange MV fires synchronously on the bronze INSERT,
+# so nimbus_rt.rt_interchange_daily advances with ZERO dbt involvement — the whole point
+# of the lambda speed layer. Prints the before/after/delta and the elapsed time.
+#   Vars: WH_DEMO_N (rows), WH_DEMO_MCC (5812=Restaurants,175bps), WH_DEMO_AMOUNT (minor).
+# Controlled backfill of the fan-in-fed targets. The auth rollups + the deduped silver
+# read the Null fan-in (auth_fanin), which holds no history, so a fresh deploy leaves them
+# empty (catchup=false). This replays every bronze auth THROUGH the Null fan-in in one
+# INSERT — firing the interchange / risk / dedup MVs once over all history — instead of
+# per-target manual -State inserts. Never POPULATE. Idempotent: truncates the targets
+# first, so re-running gives the same result. (The silver-fed rollups — finance/dau/
+# balance from slv_* — self-backfill via catchup at deploy and are NOT touched here.)
+WH_FANIN_TARGETS = nimbus_rt.rt_interchange_daily nimbus_rt.rt_risk_daily nimbus_stream.slv_card_auths
+wh-rt-backfill:
+	@echo "==> Backfilling fan-in targets: replay bronze auths through nimbus_stream.auth_fanin (Null)."
+	@echo "    truncating targets ($(WH_FANIN_TARGETS))..."
+	@for t in $(WH_FANIN_TARGETS); do \
+		$(CH_EXEC) -q "TRUNCATE TABLE IF EXISTS $$t ON CLUSTER '{cluster}'" >/dev/null 2>&1 || true; \
+	done
+	@N=$$($(CH_EXEC) -q "SELECT count() FROM nimbus_raw.raw_card_authorizations"); \
+	 echo "    replaying $$N bronze auths through the fan-in (fires interchange/risk/dedup MVs)..."; \
+	 $(CH_EXEC) -q "INSERT INTO nimbus_stream.auth_fanin SELECT auth_id, card_id, account_id, auth_ts, amount_minor, currency, mcc, merchant_name, approved, decline_reason, is_fraud, idempotency_key, ingested_at FROM nimbus_raw.raw_card_authorizations SETTINGS max_insert_block_size = 100000"
+	@echo "    fan-in targets after backfill:"
+	@$(CH_EXEC) -q "SELECT 'rt_interchange auths (fast)' AS metric, toInt64(sum(ac)) AS value FROM (SELECT countMerge(auth_count) ac FROM nimbus_rt.rt_interchange_daily GROUP BY day, merchant_category) UNION ALL SELECT 'slv_card_auths rows (with dupes, pre-merge)', count() FROM nimbus_stream.slv_card_auths UNION ALL SELECT 'slv_card_auths unique auth_id (corrected)', uniqExact(auth_id) FROM nimbus_stream.slv_card_auths FORMAT PrettyCompact"
+
+WH_DEMO_N      ?= 5
+WH_DEMO_MCC    ?= 5812
+WH_DEMO_AMOUNT ?= 10000
+wh-demo-realtime:
+	@echo "==> Real-time serving proof: $(WH_DEMO_N) approved auths -> BRONZE only; the MV"
+	@echo "    advances nimbus_rt.rt_interchange_daily with NO dbt run. (mcc=$(WH_DEMO_MCC), amount=$(WH_DEMO_AMOUNT) minor each)"
+	@BEFORE_I=$$($(CH_EXEC) -q "SELECT toInt64(ifNull(sumMerge(interchange_minor),0)) FROM nimbus_rt.rt_interchange_daily WHERE day = today()"); \
+	 BEFORE_C=$$($(CH_EXEC) -q "SELECT toInt64(ifNull(countMerge(auth_count),0)) FROM nimbus_rt.rt_interchange_daily WHERE day = today()"); \
+	 echo "    BEFORE (day=today): interchange_minor=$$BEFORE_I  auth_count=$$BEFORE_C"; \
+	 TS=$$(date +%s); START=$$TS; \
+	 $(CH_EXEC) -q "INSERT INTO nimbus_raw.raw_card_authorizations SELECT concat('demo-',toString($$TS),'-',toString(number)),'card-demo','acct-demo',now(),toInt64($(WH_DEMO_AMOUNT)),'USD',toUInt16($(WH_DEMO_MCC)),'DemoMerchant',toUInt8(1),'',toUInt8(0),concat('idem-',toString($$TS),'-',toString(number)),now() FROM numbers($(WH_DEMO_N))"; \
+	 AFTER_I=$$($(CH_EXEC) -q "SELECT toInt64(ifNull(sumMerge(interchange_minor),0)) FROM nimbus_rt.rt_interchange_daily WHERE day = today()"); \
+	 AFTER_C=$$($(CH_EXEC) -q "SELECT toInt64(ifNull(countMerge(auth_count),0)) FROM nimbus_rt.rt_interchange_daily WHERE day = today()"); \
+	 ELAPSED=$$(( $$(date +%s) - START )); \
+	 echo "    AFTER  (day=today): interchange_minor=$$AFTER_I  auth_count=$$AFTER_C"; \
+	 echo "    DELTA: interchange_minor=+$$(( AFTER_I - BEFORE_I ))  auth_count=+$$(( AFTER_C - BEFORE_C ))  (elapsed ~$${ELAPSED}s, zero dbt runs)"; \
+	 if [ "$$(( AFTER_C - BEFORE_C ))" -eq "$(WH_DEMO_N)" ]; then echo "    ✅ rollup advanced by exactly $(WH_DEMO_N) auths, live."; else echo "    ❌ expected +$(WH_DEMO_N) auths"; exit 1; fi

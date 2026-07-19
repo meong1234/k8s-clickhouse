@@ -59,6 +59,20 @@ models:
       +materialized: table
       +engine: ReplicatedMergeTree
 
+    # --- P6 real-time lambda: the streaming plane (control-plane-deployed) ---------
+    # models/stream/ -> nimbus_stream (silver), models/rt/ -> nimbus_rt (gold).
+    # Per-model config() sets the actual materialization (materialized_view /
+    # dictionary / table) and the Replicated engine — the group only fixes the schema
+    # (database) and the `rt` tag. That tag is the control-plane selector: the deploy
+    # CronJob runs `dbt run --select tag:rt`; the batch spine runs `dbt build
+    # --exclude tag:rt`, so the two planes never touch each other's objects (P6-F).
+    stream:
+      +schema: stream
+      +tags: ['rt']
+    rt:
+      +schema: rt
+      +tags: ['rt']
+
 # Static dimension seeds. No +schema -> they land in target.schema (nimbus_raw),
 # treated as static dims per the architecture doc. Replicated so they exist on both
 # pods like every other table (column types are pinned in seeds/schema.yml).

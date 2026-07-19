@@ -33,7 +33,9 @@ spec:
             - name: dbt
               image: k3d-local-dev-registry:5000/nimbus/dbt-runner:local
               imagePullPolicy: Always
-              command: ["dbt", "test"]   # the ONLY functional difference from dbt-runner
+              # Batch-spine tests only (P6 run-mode split). `--exclude tag:rt` skips the
+              # streaming plane; the untagged watermarked reconciliation tests still run.
+              command: ["dbt", "test", "--exclude", "tag:rt"]
               env:
                 - name: NIMBUS_CH_HOST
                   value: clickhouse-clickhouse

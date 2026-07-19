@@ -1,0 +1,62 @@
+---
+# dbt-deployer — the CONTROL PLANE of the real-time lambda (P6-F).
+#
+# dbt stops being the RUNTIME for the streamable slice and becomes the control plane that
+# deploys/versions the streaming objects. This CronJob runs `dbt run --select tag:rt`,
+# which creates/evolves every nimbus_stream + nimbus_rt object — the Null fan-in, the
+# dictionaries, the AggregatingMergeTree rollups + their MVs, the deduped silver, and the
+# micro-batch funnel — via the in-place ALTER TABLE ... MODIFY QUERY path (P6-A verdict b),
+# so a deploy on an UNCHANGED project is a no-op and the live MVs keep firing with no gap.
+#
+# Like dbt-runner/dbt-tester it is SUSPENDED and driven on-change by `make wh-deploy`
+# (kubectl create job --from=cronjob/dbt-deployer) — the same zero-templating pattern.
+# It does NOT run `dbt build`: the streaming plane must never be `--full-refresh`ed
+# casually (that drops live MVs — see the guard in warehouse/README.md); MODIFY QUERY is
+# the only routine path.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dbt-deployer
+  namespace: clickhouse
+  labels:
+    app: dbt-deployer
+spec:
+  schedule: "0 */3 * * *"      # nominal only; suspended — deploys are on-change, not timed
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: dbt-deployer
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: dbt
+              image: k3d-local-dev-registry:5000/nimbus/dbt-runner:local
+              imagePullPolicy: Always
+              # Deploy ONLY the streaming plane (nimbus_stream + nimbus_rt). MODIFY QUERY
+              # in place; never --full-refresh here.
+              command: ["dbt", "run", "--select", "tag:rt"]
+              env:
+                - name: NIMBUS_CH_HOST
+                  value: clickhouse-clickhouse
+                - name: NIMBUS_CH_CLUSTER
+                  value: default
+                - name: NIMBUS_CH_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: dbt-credentials
+                      key: dbt_password
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

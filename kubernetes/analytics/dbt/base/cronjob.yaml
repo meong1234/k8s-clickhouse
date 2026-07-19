@@ -40,7 +40,12 @@ spec:
               # mutable tag rebuilt by `make wh-image`, so pull Always to avoid a stale image.
               image: k3d-local-dev-registry:5000/nimbus/dbt-runner:local
               imagePullPolicy: Always
-              # Default command is the image CMD (`dbt build`) — the full P2 DAG + tests.
+              # P6 run-mode split: the BATCH SPINE only. `--exclude tag:rt` keeps this
+              # build off every nimbus_stream / nimbus_rt object (the streaming plane is
+              # deployed separately by dbt-deployer), so the two planes never touch each
+              # other's objects. Batch models + the watermarked reconciliation tests (which
+              # are untagged and READ the rt rollups) still run here.
+              command: ["dbt", "build", "--exclude", "tag:rt"]
               env:
                 # The operator-created CHI service that exposes HTTP 8123 in-cluster.
                 - name: NIMBUS_CH_HOST

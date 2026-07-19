@@ -1,8 +1,10 @@
 # Real-Time Warehouse Architecture — Nimbus, event-driven medallion on ClickHouse
 
-> **Status:** design, ready to review. Companion to
-> [`warehouse-architecture.md`](warehouse-architecture.md) (the batch medallion, P0–P2 built)
-> and [`warehouse-architecture-plan.md`](warehouse-architecture-plan.md).
+> **Status:** **adopted as P6** of the build plan (2026-07) — the phased P-RT0…P-RT5 roadmap in
+> §8 is folded into [`warehouse-architecture-plan.md`](warehouse-architecture-plan.md) §P6 as
+> sub-phases A–F (with concrete files, grants, and acceptance criteria); track progress there.
+> Companion to [`warehouse-architecture.md`](warehouse-architecture.md) (the batch medallion,
+> P0–P5 built — now the lambda's batch spine).
 > **Thesis:** the medallion transformation *bronze → silver → gold* should run **continuously
 > inside ClickHouse** (materialized-view cascade), not on a scheduled `dbt build`. dbt stops being
 > the *runtime* and becomes the *control plane* that deploys and versions the streaming objects —
@@ -274,13 +276,12 @@ canary, exactly as in the batch plan's risk model.
 
 ---
 
-## 10. Open questions for you
+## 10. Open questions — RESOLVED (recorded in the plan's P6 preamble)
 
-- **T2 mechanism preference** if the P-RT0 spike shows refreshable MVs are flaky on Replicated
-  targets on 26.3 — accept a **non-replicated RMV target** (simpler, loses HA on that one table)
-  or the **micro-batch dbt CronJob** fallback (HA-preserving, one more CronJob)?
-- **Scope of the first cut** — build only the flagship slice (P-RT0→P-RT1) to prove the paradigm,
-  or the full gold set (through P-RT3) in one go?
-- **Serving** — is the target a live dashboard (Grafana over ClickHouse) as the visible proof, or
-  is `make wh-demo-realtime` (query before/after an insert) enough to demonstrate the seconds-tier
-  freshness?
+- **T2 mechanism** — refreshable MV *if* the P6-A spike proves it on Replicated targets on 26.3;
+  otherwise the **micro-batch dbt CronJob** fallback (HA-preserving — chosen over a
+  non-replicated RMV target).
+- **Scope** — the **full build** through reconciliation (all of P-RT0…P-RT5 as P6 sub-phases
+  A–F), not just the flagship slice.
+- **Serving** — `make wh-demo-realtime` is the proof (insert → `sumMerge` advances in seconds,
+  zero dbt). A Grafana dashboard over ClickHouse is a documented future extension.

@@ -90,6 +90,11 @@ spec:
         - "GRANT ALL ON nimbus_intermediate.*"
         - "GRANT ALL ON nimbus_marts.*"
         - "GRANT ALL ON nimbus_metrics.*"
+        # P6 (real-time lambda): the streaming plane. dbt deploys the MV cascade /
+        # dictionaries here as the control plane; grants are enumerated per-DB (no
+        # prefix wildcard), so these two MUST be listed or every rt deploy fails.
+        - "GRANT ALL ON nimbus_stream.*"
+        - "GRANT ALL ON nimbus_rt.*"
 
     profiles:
       default/max_memory_usage: "1500000000"     # ~1.5 GiB, fits the 2Gi pod limit

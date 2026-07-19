@@ -4,5 +4,7 @@ kind: Kustomization
 # Namespace `clickhouse` is created by the keeper base (deployed first) and is where the
 # dbt-credentials Secret already lives — so it is intentionally not re-declared here.
 resources:
-  - cronjob.yaml
-  - tester-cronjob.yaml
+  - cronjob.yaml            # dbt-runner   — batch spine build (dbt build --exclude tag:rt)
+  - tester-cronjob.yaml     # dbt-tester   — batch spine tests (dbt test  --exclude tag:rt)
+  - deployer-cronjob.yaml   # dbt-deployer — P6 control plane (dbt run --select tag:rt)
+  - refresher-cronjob.yaml  # dbt-refresher— P6 T2 micro-batch (rt_activation_funnel, 5-min)
