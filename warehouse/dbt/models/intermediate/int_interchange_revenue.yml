@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: int_interchange_revenue
+    description: >
+      Interchange revenue per approved card authorization, computed with integer bps math
+      (intDiv(amount_minor * interchange_rate_bps, 10000)). One row per approved auth_id.
+    columns:
+      - name: auth_id
+        description: The approved authorization — grain of this model (unique post-dedup).
+        data_tests: [not_null, unique]
+      - name: interchange_rate_bps
+        description: Interchange rate in basis points from the auth's MCC.
+        data_tests: [not_null]
+      - name: interchange_revenue_minor
+        description: Revenue in minor units — intDiv(amount_minor * rate_bps, 10000).
+        data_tests: [not_null]

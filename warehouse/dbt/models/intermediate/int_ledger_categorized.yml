@@ -1,0 +1,21 @@
+version: 2
+
+models:
+  - name: int_ledger_categorized
+    description: >
+      stg_ledger_postings enriched with revenue classification (from
+      seed_transaction_categories) and MCC interchange rate (from seed_mcc_codes). Grain
+      unchanged — one row per posting.
+    columns:
+      - name: posting_id
+        description: Unique ledger leg id — grain of this model.
+        data_tests: [not_null, unique]
+      - name: is_revenue
+        description: Whether the posting's category is a Nimbus revenue line.
+        data_tests: [not_null]
+      - name: revenue_type
+        description: "Revenue classification — interchange | fee | interest | none."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['interchange', 'fee', 'interest', 'none']

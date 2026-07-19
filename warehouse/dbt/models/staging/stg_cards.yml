@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_cards
+    description: >
+      Deduped, typed view over nimbus_raw.raw_cards — one row per card_id (latest by
+      ingested_at).
+    columns:
+      - name: card_id
+        description: Unique card id.
+        data_tests: [not_null, unique]
+      - name: account_id
+        description: The account this card is attached to.
+        data_tests: [not_null]
+      - name: customer_id
+        description: The customer that holds this card.
+        data_tests: [not_null]
+      - name: network
+        description: "Card network — visa | mastercard."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['visa', 'mastercard']

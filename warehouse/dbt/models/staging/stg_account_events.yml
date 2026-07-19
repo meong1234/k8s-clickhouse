@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_account_events
+    description: >
+      Typed/renamed 1:1 view over nimbus_raw.raw_account_events — the append-only account
+      state change log. Feeds int_accounts_scd2.
+    columns:
+      - name: account_event_id
+        description: Unique id for this account state change.
+        data_tests: [not_null, unique]
+      - name: account_id
+        description: The account whose status changed.
+        data_tests: [not_null]
+      - name: event_ts
+        description: When the status change occurred (SCD2 valid_from driver).
+        data_tests: [not_null]
+      - name: new_status
+        description: "The status entered — one of: active, frozen, closed."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['active', 'frozen', 'closed']

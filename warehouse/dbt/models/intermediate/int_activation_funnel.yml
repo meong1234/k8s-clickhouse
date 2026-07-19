@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: int_activation_funnel
+    description: >
+      One wide row per customer with the four activation milestones (signup, KYC verified,
+      first funding, first outbound txn). Later milestones are NULL until reached. The
+      monotonicity invariant (signup <= verified <= funded <= txn) is spot-checked in P4
+      and formalized in P7.
+    columns:
+      - name: customer_id
+        description: The customer — grain of this model.
+        data_tests: [not_null, unique]
+      - name: signup_ts
+        description: Signup timestamp — the funnel entry point (always present).
+        data_tests: [not_null]
+      - name: kyc_verified_ts
+        description: Earliest 'verified' KYC event, or NULL if never verified.
+      - name: first_funded_ts
+        description: Earliest money-in posting on the customer's accounts, or NULL.
+      - name: first_txn_ts
+        description: Earliest money-out posting, or NULL.

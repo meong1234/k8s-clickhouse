@@ -6,8 +6,8 @@ version: 2
 # Freshness is disabled: this is a static synthetic demo, regenerated on demand
 # via `make wh-generate`, so there is no live ingestion clock to check against.
 #
-# P2 touches only the two tables the vertical slice needs. P4 extends this
-# declaration to all 8 raw tables.
+# All 8 raw tables are declared (extended from the P2 two-table slice in P4).
+# Exact column definitions live in warehouse/loaders/00_create_raw.sql.
 sources:
   - name: nimbus_raw
     schema: nimbus_raw
@@ -16,12 +16,37 @@ sources:
       Nimbus source systems. Static synthetic data; freshness checks disabled.
     freshness: null
     tables:
+      - name: raw_customers
+        description: >
+          One row per customer (opening snapshot). ReplacingMergeTree(ingested_at) —
+          dedupe on customer_id with argMax(ingested_at) when reading directly.
+      - name: raw_kyc_events
+        description: >
+          One KYC status change per row (append-only event log). new_status is one of
+          submitted | pending | verified | rejected; strictly ordered per customer.
+      - name: raw_accounts
+        description: >
+          One row per account (opening snapshot). ReplacingMergeTree(ingested_at) —
+          dedupe on account_id with argMax(ingested_at) when reading directly.
+      - name: raw_account_events
+        description: >
+          One account state change per row (append-only). new_status is one of
+          active | frozen | closed.
+      - name: raw_cards
+        description: >
+          One row per card. ReplacingMergeTree(ingested_at) — dedupe on card_id with
+          argMax(ingested_at) when reading directly.
       - name: raw_ledger_postings
         description: >
           One double-entry ledger leg. Balanced: every transaction_id's postings sum
           to zero (customer-account leg + offsetting NIMBUS-* internal/settlement leg).
           amount_minor is a positive magnitude; the sign comes from `direction`.
-      - name: raw_accounts
+      - name: raw_card_authorizations
         description: >
-          One row per account (opening snapshot). ReplacingMergeTree(ingested_at) —
-          dedupe on account_id with argMax(ingested_at) when reading directly.
+          One card authorization attempt. INTENTIONALLY duplicated (~3% of rows
+          re-inserted with a later ingested_at) to drive the silver dedup demo — the
+          stg_card_auths view collapses them back via argMax(ingested_at) on auth_id.
+      - name: raw_app_events
+        description: >
+          One mobile-app event (high volume, low consistency). Feeds the daily-active-
+          users rollup.

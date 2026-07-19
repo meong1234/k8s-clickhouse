@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: stg_card_auths
+    description: >
+      Deduped, typed view over nimbus_raw.raw_card_authorizations — one row per auth_id
+      (latest by ingested_at via dedupe_latest). Bronze deliberately carries ~3%
+      duplicate auth_id rows; this view collapses them. The `unique` test on auth_id
+      below IS the dedup-effectiveness check (P4 acceptance criterion).
+    columns:
+      - name: auth_id
+        description: Unique authorization id — one row per auth after dedup.
+        data_tests: [not_null, unique]
+      - name: card_id
+        description: The card the authorization was made on.
+        data_tests: [not_null]
+      - name: auth_date
+        description: Date bucket of auth_ts.
+        data_tests: [not_null]
+      - name: approved
+        description: "1 = approved, 0 = declined (UInt8)."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: mcc
+        description: Merchant Category Code — joins seed_mcc_codes for the interchange rate.
+        data_tests: [not_null]

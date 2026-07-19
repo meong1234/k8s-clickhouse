@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_kyc_events
+    description: >
+      Typed/renamed 1:1 view over nimbus_raw.raw_kyc_events — the append-only KYC status
+      change log. Feeds int_customers_scd2 and the funnel's verified timestamp.
+    columns:
+      - name: kyc_event_id
+        description: Unique id for this KYC status change.
+        data_tests: [not_null, unique]
+      - name: customer_id
+        description: The customer whose KYC status changed.
+        data_tests: [not_null]
+      - name: event_ts
+        description: When the status change occurred (SCD2 valid_from driver).
+        data_tests: [not_null]
+      - name: new_status
+        description: "The status entered — one of: submitted, pending, verified, rejected."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['submitted', 'pending', 'verified', 'rejected']

@@ -1,0 +1,24 @@
+version: 2
+
+models:
+  - name: stg_accounts
+    description: >
+      Deduped, typed view over nimbus_raw.raw_accounts — one row per account_id (latest
+      by ingested_at). Adds opened_date (Date). The account->customer mapping and the
+      daily-balance spine start both read from here.
+    columns:
+      - name: account_id
+        description: Unique account id.
+        data_tests: [not_null, unique]
+      - name: customer_id
+        description: The customer that owns this account.
+        data_tests: [not_null]
+      - name: account_type
+        description: "checking | savings."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['checking', 'savings']
+      - name: opened_date
+        description: Date bucket of opened_ts — the balance spine's start day.
+        data_tests: [not_null]

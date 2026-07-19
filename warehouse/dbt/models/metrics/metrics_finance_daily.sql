@@ -8,13 +8,12 @@
 --
 -- The metric DEFINITIONS are the contract (see the column docs in the .yml). Grain: day.
 -- Small (~18 months of days), so a full-rebuild table; engine inherited from the metrics
--- layer default. Customer attribution comes from the deduped raw_accounts (account->customer).
+-- layer default. Customer attribution comes from stg_accounts (already deduped).
 with account_customer as (
     select
         account_id,
-        argMax(customer_id, ingested_at) as customer_id
-    from {{ source('nimbus_raw', 'raw_accounts') }}
-    group by account_id
+        customer_id
+    from {{ ref('stg_accounts') }}
 )
 
 select

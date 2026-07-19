@@ -35,3 +35,15 @@ nimbus:
       cluster_mode: false
       connect_timeout: 10
       send_receive_timeout: 300
+      # Single-threaded builds: the cluster is capped at ~1.35 GiB total memory (0.9 x
+      # the 1536Mi laptop pod limit), so running model/test queries one at a time keeps
+      # peak memory bounded instead of stacking concurrent aggregations.
+      threads: 1
+      # Let heavy GROUP BY / ORDER BY spill to disk past ~384 MiB instead of holding it
+      # all in RAM. The uniqueness tests on the high-volume staging views (stg_app_events
+      # ~10M rows at full scale, stg_card_auths) build a group-by hash over every key and
+      # would otherwise trip the server memory cap. Spilling trades a little I/O for a
+      # reliable green `make wh-build` under the tight budget.
+      custom_settings:
+        max_bytes_before_external_group_by: 402653184
+        max_bytes_before_external_sort: 402653184

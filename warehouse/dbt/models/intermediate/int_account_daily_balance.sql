@@ -51,13 +51,12 @@
 {%- endif -%}
 
 with accounts as (
-    -- Dedup the ReplacingMergeTree source: one opened_day per real account.
-    -- (P4 will repoint this at stg_accounts.)
+    -- One opened_day per real account. stg_accounts already deduped the
+    -- ReplacingMergeTree source, so we just project its opened_date here.
     select
         account_id,
-        toDate(argMax(opened_ts, ingested_at)) as opened_day
-    from {{ source('nimbus_raw', 'raw_accounts') }}
-    group by account_id
+        opened_date as opened_day
+    from {{ ref('stg_accounts') }}
 ),
 
 bounds as (

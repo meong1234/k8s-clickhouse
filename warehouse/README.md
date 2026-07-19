@@ -308,6 +308,50 @@ make wh-all                   # image -> bronze -> generate -> build -> test, en
 
 ---
 
+## P4 — full silver (staging + intermediate)
+
+P4 fills out the entire silver layer on top of the P3 runtime: **7 staging views** (`stg_customers`,
+`stg_kyc_events`, `stg_accounts`, `stg_account_events`, `stg_cards`, `stg_app_events`,
+`stg_card_auths` — joining the P2 `stg_ledger_postings`) and **6 intermediate models** carrying the
+teaching-value logic. `sources.yml` now declares all 8 `raw_*` tables.
+
+- **Staging = typed/renamed 1:1 views.** The three `ReplacingMergeTree` sources
+  (customers/accounts/cards) and the duplicate-bearing `raw_card_authorizations` are collapsed to
+  one row per key with the new `dedupe_latest()` macro (`argMax(col, ingested_at) GROUP BY key`) —
+  the same idiom P2 used inline, now reusable. Append-only event streams pass straight through.
+- **`int_customers_scd2` / `int_accounts_scd2`** — SCD2 histories derived from the change-event logs
+  with `leadInFrame` windowing; the open interval carries a far-future sentinel `valid_to`
+  (`2999-12-31`) plus `is_current`, which keeps contiguity tests and P5 as-of joins NULL-free.
+- **`int_ledger_categorized`** joins the category + MCC seeds; **`int_interchange_revenue`** computes
+  interchange with integer bps math (`intDiv(amount_minor * rate_bps, 10000)`, per-auth so P6's
+  reconciliation holds); **`int_activation_funnel`** is one wide row per customer; and
+  **`int_daily_active_users`** is a `uniqExact` day rollup materialized as a table (the one heavy
+  scan), not a view.
+
+**Dedup folds into staging (note vs architecture §5).** The `docs/warehouse-architecture.md` §5
+lineage shows a separate `int_card_auths_deduped` node. We deliberately **fold that dedup into
+`stg_card_auths`** instead — staging is where §2 says dedup belongs, and a passthrough intermediate
+model would add nothing. `int_interchange_revenue` (and P5's `fct_card_authorizations`) read the
+already-deduped staging view directly. The `unique` test on `stg_card_auths.auth_id` is the
+dedup-effectiveness check: it passes while `nimbus_raw.raw_card_authorizations` still holds the ~3%
+duplicates.
+
+The P2 `int_account_daily_balance` and `metrics_finance_daily` now read `stg_accounts` instead of
+re-deduping `raw_accounts` inline (the TODO their P2 comments left for P4).
+
+### P4 acceptance
+
+- `make wh-build && make wh-test` green in-cluster (full DAG ≈ 25+ models).
+- **Dedup:** `count() = uniqExact(auth_id)` in `nimbus_staging.stg_card_auths`, while bronze
+  `raw_card_authorizations` still has `count() > uniqExact(auth_id)`.
+- **SCD2 spot check** (a customer with ≥2 KYC events): intervals contiguous (each `valid_to` = next
+  `valid_from`), no overlap, exactly one `is_current`.
+- **Funnel monotonicity** (`signup ≤ verified ≤ funded ≤ txn`) holds for all customers (spot query;
+  formal test in P7).
+- **DAU** covers the 18-month window with plausible values, no spurious zero-gaps.
+
+---
+
 ## P0 spike findings — `dbt-clickhouse` + `ON CLUSTER` + replication
 
 The whole point of P0 was to *validate* how the adapter drives a replicated cluster and how a

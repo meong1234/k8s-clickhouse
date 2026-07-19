@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: int_daily_active_users
+    description: >
+      Distinct active customers per calendar day (uniqExact) from stg_app_events.
+      Materialized as a ReplicatedMergeTree table (heavy scan, feeds multiple P6 metrics).
+      One row per activity_date.
+    columns:
+      - name: activity_date
+        description: Calendar day — grain of this model.
+        data_tests: [not_null, unique]
+      - name: dau
+        description: Exact count of distinct customers active that day.
+        data_tests: [not_null]

@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: stg_app_events
+    description: >
+      Typed/renamed 1:1 view over nimbus_raw.raw_app_events (high volume). Adds
+      event_date (Date) — the grain int_daily_active_users groups on.
+    columns:
+      - name: event_id
+        description: Unique id for this app event.
+        data_tests: [not_null, unique]
+      - name: customer_id
+        description: The customer that generated the event.
+        data_tests: [not_null]
+      - name: event_date
+        description: Date bucket of event_ts — the DAU grain.
+        data_tests: [not_null]

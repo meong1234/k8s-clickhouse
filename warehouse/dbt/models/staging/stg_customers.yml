@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: >
+      Deduped, typed view over nimbus_raw.raw_customers — one row per customer_id
+      (latest by ingested_at via dedupe_latest). 1:1 otherwise.
+    columns:
+      - name: customer_id
+        description: Unique customer id.
+        data_tests: [not_null, unique]
+      - name: signup_ts
+        description: Account signup timestamp — the funnel's entry point.
+        data_tests: [not_null]
+      - name: country
+        description: ISO 3166-1 alpha-2 country code; joins seed_countries for region.
+        data_tests: [not_null]
+      - name: risk_tier
+        description: "KYC/risk tier — one of: low, medium, high."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['low', 'medium', 'high']
