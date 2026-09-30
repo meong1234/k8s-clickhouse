@@ -24,3 +24,6 @@
 
 # Generated synthetic-data CSVs (produced by `make wh-generate`, not source)
 /warehouse/generator/out/
+
+# Local scratch/dump folder — never committed. Claude must never read it (see CLAUDE.md).
+/.ignore/
