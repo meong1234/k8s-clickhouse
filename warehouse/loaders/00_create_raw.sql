@@ -4,59 +4,26 @@
 -- (clickhouse-client --multiquery). Idempotent: every object is IF NOT EXISTS, so
 -- re-running is a no-op. Data is loaded separately (make wh-generate).
 --
--- Replication, two levels (branch cas-local-s3, docs/cas-local-s3-plan.md §5
--- "Replicated databases"):
---
---   1. the DATABASES use the `Replicated` engine, so the schema itself lives in Keeper
---      and a replica that comes back with an empty data PVC replays every CREATE from
---      the database's own DDL log instead of needing a hand-written replay. The CREATE
---      DATABASE statements below are the only DDL a rebuilt replica still needs, and
---      they are what `make wh-bronze` re-applies.
---   2. the TABLES use a Replicated* engine with NO engine arguments. Inside a
---      Replicated database explicit arguments are rejected outright
---      (`Code: 36 … not allowed to specify explicit zookeeper_path and replica_name …
---      in Replicated database`); the engine derives /clickhouse/tables/{uuid}/{shard}
---      from the table UUID, which the database's DDL log carries, so both replicas —
---      and any later rebuild — agree on the path without a static name.
---
--- For the same reason there is no `ON CLUSTER` on any statement INSIDE these databases
--- (`Code: 80 … ON CLUSTER is not allowed for Replicated database`): the database
--- replicates its own DDL. `ON CLUSTER` stays on CREATE DATABASE, which is the one
--- statement that must reach every node directly.
+-- Replication: every table uses a Replicated* engine with an EXPLICIT keeper path
+--   /clickhouse/tables/{shard}/nimbus_raw/<table>   (replica '{replica}')
+-- — the same teaching pattern as `make ch-demo`. {shard}/{replica} are the
+-- operator-provided macros; the path is static (not {uuid}) so the DDL reads
+-- self-explanatory. These tables are created once and TRUNCATE'd (not dropped) on
+-- reload, so static paths never collide with Atomic deferred-drops.
 --
 -- Amounts are always integer minor units (cents) — never floats (fintech practice).
 -- `ingested_at` is on every table to drive dedup + incremental loads downstream.
---
--- Storage (branch cas-local-s3, docs/cas-local-s3-plan.md §1.4): bronze is the bulk of
--- the bytes and is append-only, so it runs on the `cas_tiered` policy — inserts land on
--- the local `default` volume (CAS's insert path is not optimised yet) and a table TTL
--- moves partitions older than 90 days down to the CAS volume, where both replicas share
--- one copy of the blobs. The TTL column is the table's own EVENT time where it has one
--- (that is the age the tier is about); the three Replacing snapshot tables have no event
--- time, so they age by `ingested_at`, which is also their version column.
--- `min_bytes_for_wide_part` / `min_level_for_wide_part` are raised per the CAS guidance:
--- low-level parts stay compact, so a partition becomes a handful of objects, not
--- thousands. These settings only apply at CREATE — an existing table must be dropped
--- (not truncated) to pick them up.
 
--- Medallion layer databases (one ClickHouse database == one dbt schema). dbt never
--- creates these: its profile declares the same engine, but dbt-clickhouse 1.10.1 drops
--- ON CLUSTER once `database_engine` is Replicated, so a dbt-created database would land
--- on one replica only. They are created here, up front, for all six dbt schemas.
-CREATE DATABASE IF NOT EXISTS nimbus_raw          ON CLUSTER '{cluster}'
-    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_raw', '{shard}', '{replica}');
-CREATE DATABASE IF NOT EXISTS nimbus_staging      ON CLUSTER '{cluster}'
-    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_staging', '{shard}', '{replica}');
-CREATE DATABASE IF NOT EXISTS nimbus_intermediate ON CLUSTER '{cluster}'
-    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_intermediate', '{shard}', '{replica}');
-CREATE DATABASE IF NOT EXISTS nimbus_marts        ON CLUSTER '{cluster}'
-    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_marts', '{shard}', '{replica}');
-CREATE DATABASE IF NOT EXISTS nimbus_metrics      ON CLUSTER '{cluster}'
-    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_metrics', '{shard}', '{replica}');
+-- Medallion layer databases (one ClickHouse database == one dbt schema).
+CREATE DATABASE IF NOT EXISTS nimbus_raw          ON CLUSTER '{cluster}';
+CREATE DATABASE IF NOT EXISTS nimbus_staging      ON CLUSTER '{cluster}';
+CREATE DATABASE IF NOT EXISTS nimbus_intermediate ON CLUSTER '{cluster}';
+CREATE DATABASE IF NOT EXISTS nimbus_marts        ON CLUSTER '{cluster}';
+CREATE DATABASE IF NOT EXISTS nimbus_metrics      ON CLUSTER '{cluster}';
 
 -- 1. customers — one row per customer (opening snapshot). ReplacingMergeTree keeps
 --    the latest row per customer_id by ingested_at.
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_customers
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_customers ON CLUSTER '{cluster}'
 (
     customer_id     String,
     signup_ts       DateTime,
@@ -68,13 +35,11 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_customers
     referral_source LowCardinality(String),
     ingested_at     DateTime
 )
-ENGINE = ReplicatedReplacingMergeTree(ingested_at)
-ORDER BY customer_id
-TTL ingested_at + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_customers', '{replica}', ingested_at)
+ORDER BY customer_id;
 
 -- 2. kyc_events — one row per KYC status change (append-only event log).
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_kyc_events
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_kyc_events ON CLUSTER '{cluster}'
 (
     kyc_event_id String,
     customer_id  String,
@@ -84,13 +49,11 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_kyc_events
     reason       String,
     ingested_at  DateTime
 )
-ENGINE = ReplicatedMergeTree
-ORDER BY (customer_id, event_ts)
-TTL event_ts + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_kyc_events', '{replica}')
+ORDER BY (customer_id, event_ts);
 
 -- 3. accounts — one row per account (opening snapshot).
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_accounts
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_accounts ON CLUSTER '{cluster}'
 (
     account_id        String,
     customer_id       String,
@@ -99,13 +62,11 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_accounts
     interest_rate_bps UInt16,
     ingested_at       DateTime
 )
-ENGINE = ReplicatedReplacingMergeTree(ingested_at)
-ORDER BY account_id
-TTL ingested_at + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_accounts', '{replica}', ingested_at)
+ORDER BY account_id;
 
 -- 4. account_events — one row per account state change (active/frozen/closed).
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_account_events
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_account_events ON CLUSTER '{cluster}'
 (
     account_event_id String,
     account_id       String,
@@ -114,13 +75,11 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_account_events
     new_status       LowCardinality(String),  -- active | frozen | closed
     ingested_at      DateTime
 )
-ENGINE = ReplicatedMergeTree
-ORDER BY (account_id, event_ts)
-TTL event_ts + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_account_events', '{replica}')
+ORDER BY (account_id, event_ts);
 
 -- 5. cards — one row per card.
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_cards
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_cards ON CLUSTER '{cluster}'
 (
     card_id     String,
     account_id  String,
@@ -131,14 +90,12 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_cards
     last4       FixedString(4),
     ingested_at DateTime
 )
-ENGINE = ReplicatedReplacingMergeTree(ingested_at)
-ORDER BY card_id
-TTL ingested_at + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_cards', '{replica}', ingested_at)
+ORDER BY card_id;
 
 -- 6. ledger_postings — one double-entry leg. Postings for a transaction_id sum to
 --    zero (customer leg + Nimbus internal/settlement leg). Partitioned by month.
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_ledger_postings
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_ledger_postings ON CLUSTER '{cluster}'
 (
     posting_id              String,
     transaction_id          String,
@@ -154,15 +111,13 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_ledger_postings
     idempotency_key         String,
     ingested_at             DateTime
 )
-ENGINE = ReplicatedMergeTree
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_ledger_postings', '{replica}')
 PARTITION BY toYYYYMM(posting_ts)
-ORDER BY (account_id, posting_ts)
-TTL posting_ts + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ORDER BY (account_id, posting_ts);
 
 -- 7. card_authorizations — one auth attempt. INTENTIONALLY duplicated (~3% of rows
 --    re-inserted with a later ingested_at) to drive the silver dedup demo.
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_card_authorizations
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_card_authorizations ON CLUSTER '{cluster}'
 (
     auth_id         String,
     card_id         String,
@@ -178,14 +133,12 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_card_authorizations
     idempotency_key String,
     ingested_at     DateTime
 )
-ENGINE = ReplicatedMergeTree
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_card_authorizations', '{replica}')
 PARTITION BY toYYYYMM(auth_ts)
-ORDER BY (card_id, auth_ts)
-TTL auth_ts + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ORDER BY (card_id, auth_ts);
 
 -- 8. app_events — one mobile-app event. High volume, low consistency.
-CREATE TABLE IF NOT EXISTS nimbus_raw.raw_app_events
+CREATE TABLE IF NOT EXISTS nimbus_raw.raw_app_events ON CLUSTER '{cluster}'
 (
     event_id    String,
     customer_id String,
@@ -196,8 +149,6 @@ CREATE TABLE IF NOT EXISTS nimbus_raw.raw_app_events
     session_id  String,
     ingested_at DateTime
 )
-ENGINE = ReplicatedMergeTree
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/nimbus_raw/raw_app_events', '{replica}')
 PARTITION BY toYYYYMM(event_ts)
-ORDER BY (customer_id, event_ts)
-TTL event_ts + INTERVAL 90 DAY TO VOLUME 'cas'
-SETTINGS storage_policy = 'cas_tiered', min_bytes_for_wide_part = 100000000, min_level_for_wide_part = 3;
+ORDER BY (customer_id, event_ts);

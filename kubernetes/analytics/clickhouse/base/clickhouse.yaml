@@ -96,87 +96,6 @@ spec:
         - "GRANT ALL ON nimbus_stream.*"
         - "GRANT ALL ON nimbus_rt.*"
 
-    # ---- CAS disk (Altinity content-addressed object storage) ----
-    # Experimental, Antalya 26.6+ only - see docs/cas-local-s3-plan.md.
-    #
-    # Rendered verbatim by the operator into config.d/. The credentials are NOT in this
-    # file: `from_env` makes the server read them at config-load time from the pod env,
-    # which comes from the `minio-credentials` Secret (podTemplate below) - the same
-    # indirection the admin password uses.
-    #
-    # `skip_access_check` is deliberately left at its default (false): the boot-time
-    # capability probe asserting conditional writes / ranged reads is the ONLY thing
-    # standing between us and silent corruption on an S3 that fakes the semantics.
-    # Phase A (`make minio-probe`) says MinIO passes; the probe re-checks it for real.
-    #
-    # The endpoint is the in-cluster MinIO service in base as well as local. That is a
-    # branch-scoped compromise: a real deployment would point base at a real bucket
-    # (and a scoped IAM principal) and let the local overlay patch it to MinIO.
-    files:
-      config.d/cas_disk.xml: |
-        <clickhouse>
-          <storage_configuration>
-            <disks>
-              <cas>
-                <type>object_storage</type>
-                <object_storage_type>s3</object_storage_type>
-                <metadata_type>cas</metadata_type>
-                <!-- Must be unique AND stable per pool member; the operator's per-pod
-                     {replica} macro is both. Reusing another member's id would let two
-                     servers claim the same mount lease. -->
-                <cas_server_root_id>{replica}</cas_server_root_id>
-                <endpoint>http://minio.minio.svc.cluster.local:9000/clickhouse-cas/cas/{cluster}/</endpoint>
-                <access_key_id from_env="CAS_S3_ACCESS_KEY_ID"/>
-                <secret_access_key from_env="CAS_S3_SECRET_ACCESS_KEY"/>
-                <region>us-east-1</region>
-                <!-- Required by the CAS docs: without a long-lived keep-alive pool the
-                     mount-lease renewals get starved behind TIME_WAIT churn and a
-                     healthy server can lose its lease under load. -->
-                <http_keep_alive_timeout>30</http_keep_alive_timeout>
-                <http_keep_alive_max_requests>10000</http_keep_alive_max_requests>
-                <!-- Fixed at pool creation and unchangeable afterwards: changing it
-                     means a new bucket prefix. xxh3-128 = fast, no known collision
-                     classes. -->
-                <cas_blob_hash>xxh3-128</cas_blob_hash>
-              </cas>
-              <!-- Local read-through cache in front of CAS. Lives on the existing 10Gi
-                   data PVC, so keep max_size well under it. Every policy below uses
-                   cas_cache, never `cas` directly. -->
-              <cas_cache>
-                <type>cache</type>
-                <disk>cas</disk>
-                <path>/var/lib/clickhouse/cas_cache/</path>
-                <max_size>3Gi</max_size>
-              </cas_cache>
-            </disks>
-            <policies>
-              <!-- Pure CAS: no local volume at all, so every effect (relink, GC, an
-                   outage) is visible immediately. Used by demo.* in Phases B and C. -->
-              <cas>
-                <volumes>
-                  <main>
-                    <disk>cas_cache</disk>
-                  </main>
-                </volumes>
-              </cas>
-              <!-- Local hot -> CAS cold. The insert path is not optimised for CAS yet,
-                   so writes land on `default` and a table TTL moves aged partitions
-                   down to the CAS volume. This is what bronze uses in Phase D. -->
-              <cas_tiered>
-                <volumes>
-                  <hot>
-                    <disk>default</disk>
-                    <volume_priority>1</volume_priority>
-                  </hot>
-                  <cas>
-                    <disk>cas_cache</disk>
-                  </cas>
-                </volumes>
-              </cas_tiered>
-            </policies>
-          </storage_configuration>
-        </clickhouse>
-
     profiles:
       default/max_memory_usage: "1500000000"     # ~1.5 GiB, fits the 2Gi pod limit
       default/load_balancing: "nearest_hostname"
@@ -213,23 +132,8 @@ spec:
                   topologyKey: "kubernetes.io/hostname"
           containers:
             - name: clickhouse
-              # Antalya 26.6 (experimental) for CAS - see docs/cas-local-s3-plan.md.
-              # Keeper stays on the 26.3 LTS build.
-              image: altinity/clickhouse-server:26.6.4.20001.altinityantalya
+              image: altinity/clickhouse-server:26.3.16.10001.altinitystable
               imagePullPolicy: IfNotPresent
-              # Read back by config.d/cas_disk.xml through `from_env`, so the CAS
-              # credentials never appear in the CHI or in the rendered config.
-              env:
-                - name: CAS_S3_ACCESS_KEY_ID
-                  valueFrom:
-                    secretKeyRef:
-                      name: minio-credentials
-                      key: CAS_S3_ACCESS_KEY_ID
-                - name: CAS_S3_SECRET_ACCESS_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: minio-credentials
-                      key: CAS_S3_SECRET_ACCESS_KEY
               resources:
                 requests:
                   cpu: 500m

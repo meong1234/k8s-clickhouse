@@ -11,40 +11,18 @@ REG_HOST_PORT ?= 5050
 # Project images
 #
 # Operator + metrics exporter come from the Altinity clickhouse-operator chart
-# (chart 0.27.1 => appVersion 0.27.1). Keeper stays on the Altinity Stable (LTS)
-# build; the SERVER runs Altinity Antalya 26.6 for the CAS experiment
-# (docs/cas-local-s3-plan.md) - 26.6.4 is the minimum, the CAS on-disk format
-# changed there. Experimental: do not roll this tag forward with data in the
-# pool without reading the release notes.
+# (chart 0.27.1 => appVersion 0.27.1). ClickHouse server & keeper use the
+# Altinity Stable (LTS) builds - 26.3 is the newest LTS line.
 CLICKHOUSE_OPERATOR_IMAGE := altinity/clickhouse-operator:0.27.1
 CLICKHOUSE_METRICS_IMAGE  := altinity/metrics-exporter:0.27.1
-CLICKHOUSE_SERVER_IMAGE   := altinity/clickhouse-server:26.6.4.20001.altinityantalya
+CLICKHOUSE_SERVER_IMAGE   := altinity/clickhouse-server:26.3.16.10001.altinitystable
 CLICKHOUSE_KEEPER_IMAGE   := altinity/clickhouse-keeper:26.3.16.10001.altinitystable
-
-# In-cluster S3 for the CAS disk. `minio/minio` no longer exists on Docker Hub
-# (community images stopped Oct 2025, repos removed Sep 2026). The binary here is
-# Silo, MinIO's community successor (same lineage as the pgsty/minio fork, renamed):
-# chosen because it enforces conditional DELETE (412 on an `If-Match` mismatch),
-# which pgsty/minio ignored - and CAS's boot probe refuses to open the pool without
-# it. `pgsty/mc` still speaks to it. Everything else here still says "minio" (ns,
-# service, dir) on purpose: the name is the layer, not the binary.
-MINIO_IMAGE               := pgsty/silo:RELEASE.2026-09-16T00-00-00Z
-MINIO_MC_IMAGE            := pgsty/mc:RELEASE.2026-09-16T00-00-00Z
-
-# `mc` has no curl and no way to send conditional-write headers, so the Phase A
-# probe (`make minio-probe`) drives raw S3 from an ephemeral curl pod instead:
-# curl >= 7.75 signs requests itself with --aws-sigv4, which is the only in-cluster
-# way to send If-None-Match / If-Match / Range against MinIO.
-CURL_IMAGE                := curlimages/curl:8.18.0
 
 # All project images (add new images here)
 PROJECT_IMAGES := $(CLICKHOUSE_OPERATOR_IMAGE) \
                   $(CLICKHOUSE_METRICS_IMAGE) \
                   $(CLICKHOUSE_SERVER_IMAGE) \
-                  $(CLICKHOUSE_KEEPER_IMAGE) \
-                  $(MINIO_IMAGE) \
-                  $(MINIO_MC_IMAGE) \
-                  $(CURL_IMAGE)
+                  $(CLICKHOUSE_KEEPER_IMAGE)
 
 # Help for image management commands
 images-help:
