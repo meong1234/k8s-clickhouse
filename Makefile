@@ -7,7 +7,7 @@
 include scripts/*
 
 # Default target - orchestrates help from all script files
-help: k8s-help setup-help fluxcd-help images-help clickhouse-help warehouse-help
+help: k8s-help setup-help fluxcd-help images-help clickhouse-help minio-help cas-help warehouse-help
 	@echo "Kubernetes local ClickHouse Deployment"
 	@echo "======================================"
 	@echo ""

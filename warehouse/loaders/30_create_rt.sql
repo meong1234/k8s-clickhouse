@@ -17,10 +17,17 @@
 --                   states (ReplicatedAggregatingMergeTree), read with -Merge at
 --                   query time; plus the seed-backed dictionaries.
 --
--- Both are created ON CLUSTER so they exist on both replicas; the objects dbt creates
--- inside them are likewise ON CLUSTER (the profile's `cluster` setting drives it). The
--- single-fire-on-INSERT replication keystone (see realtime-warehouse-architecture.md §2)
--- makes the Replicated cascade correct on this 1-shard x 2-replica topology.
+-- Both are created ON CLUSTER so they exist on both replicas, and both use the
+-- `Replicated` database engine (branch cas-local-s3, docs/cas-local-s3-plan.md §5
+-- "Replicated databases"): the schema then lives in Keeper, so the MV cascade survives
+-- a replica that loses its data PVC without a hand-written DDL replay. The objects dbt
+-- creates inside them carry NO `ON CLUSTER` — a Replicated database replicates its own
+-- DDL and rejects the clause (`Code: 80`); the profile's `database_engine` key is what
+-- makes dbt drop it. The single-fire-on-INSERT replication keystone (see
+-- realtime-warehouse-architecture.md §2) makes the Replicated cascade correct on this
+-- 1-shard x 2-replica topology.
 
-CREATE DATABASE IF NOT EXISTS nimbus_stream ON CLUSTER '{cluster}';
-CREATE DATABASE IF NOT EXISTS nimbus_rt     ON CLUSTER '{cluster}';
+CREATE DATABASE IF NOT EXISTS nimbus_stream ON CLUSTER '{cluster}'
+    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_stream', '{shard}', '{replica}');
+CREATE DATABASE IF NOT EXISTS nimbus_rt     ON CLUSTER '{cluster}'
+    ENGINE = Replicated('/clickhouse/databases/{shard}/nimbus_rt', '{shard}', '{replica}');

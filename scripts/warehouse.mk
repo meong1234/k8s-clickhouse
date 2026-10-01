@@ -126,7 +126,7 @@ warehouse-help:
 	@echo "  wh-generate      - Generate + load all bronze data (SCALE=$(SCALE)); prints row counts"
 	@echo "  wh-seed          - dbt seed the static dimension CSVs (needs wh-portforward)"
 	@echo "  wh-counts        - Show bronze row counts"
-	@echo "  wh-drop          - TRUNCATE all bronze tables ON CLUSTER (keeps the schema)"
+	@echo "  wh-drop          - TRUNCATE all bronze tables (keeps the schema)"
 	@echo "                     Vars: SCALE={small|medium|large}, GEN_SEED=$(GEN_SEED)"
 	@echo ""
 
@@ -187,11 +187,14 @@ wh-rt-init:
 	@$(CH_EXEC) -q "SELECT name, engine FROM system.databases WHERE name IN ('nimbus_stream','nimbus_rt') ORDER BY name FORMAT PrettyCompact"
 
 # Truncate all bronze tables (keeps schema) — makes wh-generate re-runnable and the
-# Python-tier checksum deterministic across reloads.
+# Python-tier checksum deterministic across reloads. No ON CLUSTER: nimbus_raw is a
+# `Replicated` database, which replicates the TRUNCATE through its own DDL log and
+# rejects the clause (`Code: 80`). To change a table's ENGINE or its CREATE-time
+# SETTINGS, drop the database instead — see docs/cas-local-s3-plan.md §5.
 wh-drop:
-	@echo "==> Truncating bronze tables ON CLUSTER '$(CH_CLUSTER)'..."
+	@echo "==> Truncating bronze tables (nimbus_raw replicates the DDL itself)..."
 	@for t in $(WH_ALL_TABLES); do \
-		$(CH_EXEC) -q "TRUNCATE TABLE IF EXISTS nimbus_raw.$$t ON CLUSTER '{cluster}'" >/dev/null; \
+		$(CH_EXEC) -q "TRUNCATE TABLE IF EXISTS nimbus_raw.$$t" >/dev/null; \
 	done
 	@echo "    done."
 
@@ -297,7 +300,7 @@ wh-rt-backfill:
 	@echo "==> Backfilling fan-in targets: replay bronze auths through nimbus_stream.auth_fanin (Null)."
 	@echo "    truncating targets ($(WH_FANIN_TARGETS))..."
 	@for t in $(WH_FANIN_TARGETS); do \
-		$(CH_EXEC) -q "TRUNCATE TABLE IF EXISTS $$t ON CLUSTER '{cluster}'" >/dev/null 2>&1 || true; \
+		$(CH_EXEC) -q "TRUNCATE TABLE IF EXISTS $$t" >/dev/null 2>&1 || true; \
 	done
 	@N=$$($(CH_EXEC) -q "SELECT count() FROM nimbus_raw.raw_card_authorizations"); \
 	 echo "    replaying $$N bronze auths through the fan-in (fires interchange/risk/dedup MVs)..."; \

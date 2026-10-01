@@ -21,13 +21,27 @@ nimbus:
       # Base/default database. Layer placement (nimbus_staging, nimbus_marts, ...)
       # is handled by the generate_schema_name macro, not by this value.
       schema: nimbus_raw
-      # Run DDL ON CLUSTER '<cluster>' so models replicate across both pods.
-      # NOTE: setting `cluster` also makes dbt introspect via clusterAllReplicas()
-      # (see list_relations_without_caching), which needs the global REMOTE +
-      # CLUSTER privileges -> granted to `dbt` in the CHI <grants> block. The
+      # `cluster` is kept for dbt's clusterAllReplicas() introspection (see
+      # list_relations_without_caching), which needs the global REMOTE + CLUSTER
+      # privileges -> granted to `dbt` in the CHI <grants> block. It no longer drives
+      # ON CLUSTER DDL: `database_engine` below turns that off (see its note). The
       # table engine is NOT auto-replicated by this setting on adapter 1.10.1;
       # models set +engine ReplicatedMergeTree explicitly (see dbt_project.yml).
       cluster: "{{ env_var('NIMBUS_CH_CLUSTER', 'default') }}"
+      # Declare that every nimbus_* schema is a `Replicated` database, so the schema
+      # itself lives in Keeper and a replica that lost its data PVC replays all of it
+      # from the database's DDL log (docs/cas-local-s3-plan.md §5 "Replicated
+      # databases"). Two effects on adapter 1.10.1, both wanted:
+      #   - 'replicated' in this value makes the adapter stop emitting ON CLUSTER on
+      #     model DDL. Required: inside a Replicated database ON CLUSTER is rejected
+      #     (`Code: 80 … ON CLUSTER is not allowed for Replicated database`).
+      #   - it is the engine clause dbt would use if it ever had to create a schema.
+      # The `{database}` macro resolves to the schema being created, so one string is
+      # correct for all six nimbus_* databases. In practice dbt never creates them:
+      # losing ON CLUSTER means a dbt-created database would exist on one replica only,
+      # so loaders/00_create_raw.sql + 30_create_rt.sql create all six up front and
+      # dbt's `create database if not exists` is a no-op.
+      database_engine: "Replicated('/clickhouse/databases/{shard}/{database}', '{shard}', '{replica}')"
       # cluster_mode OFF: we do not need dbt's distributed-table / exchange-probe
       # behaviors (1 shard x 2 replicas is fully replicated, not sharded). Leaving
       # it on also spins up __dbt_exchange_test_* tables on connect. `cluster`
@@ -47,3 +61,11 @@ nimbus:
       custom_settings:
         max_bytes_before_external_group_by: 402653184
         max_bytes_before_external_sort: 402653184
+        # Wait for every replica to apply a DDL entry before the next statement runs.
+        # The adapter only sets this when `database_engine` is the bare word
+        # `Replicated`, and ours carries the zk path, so set it here: dbt builds a model
+        # and immediately reads it back, and an un-applied CREATE on the peer would
+        # surface as a flaky UNKNOWN_TABLE. (The adapter's other Replicated default,
+        # insert_quorum=auto, is deliberately NOT set — on 2 replicas it would make
+        # every insert fail while one replica is being rebuilt.)
+        database_replicated_enforce_synchronous_settings: 1

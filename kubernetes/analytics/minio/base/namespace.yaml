@@ -1,0 +1,12 @@
+---
+# Dedicated namespace for the in-cluster S3 backend. Kept OUT of the `clickhouse`
+# namespace on purpose: the object store is the one piece of this experiment that
+# is meant to be swappable (see docs/cas-local-s3-plan.md §5 — SeaweedFS / Ceph RGW
+# are the fallbacks if MinIO fails the CAS conditional-write probe), so it owns its
+# own namespace and its own Flux Kustomization and touches nothing in the CHI.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled

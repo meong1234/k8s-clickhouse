@@ -1,0 +1,84 @@
+---
+# Single-node MinIO. One replica is deliberate: this backend exists to prove CAS
+# *semantics* (conditional PUTs, ranged reads, stable ETags), not MinIO durability,
+# and a distributed MinIO would need 4 pods + 4 PVCs on a laptop for no extra signal.
+#
+# A StatefulSet (not a Deployment) because the S3 data must keep its identity across
+# restarts — a Deployment + PVC would let a rolling update run two pods against the
+# same RWO volume, which MinIO refuses.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: minio
+  labels:
+    app: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: minio
+          # Silo, MinIO's community successor: swapped in because it enforces
+          # conditional DELETE (`If-Match`), which pgsty/minio ignored and CAS's
+          # boot probe rejects the pool without — see scripts/images.mk.
+          image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: MINIO_ROOT_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    # 20Gi on the default StorageClass (k3s `local-path`). Sized for the bronze
+    # tier in Phase D; the pool is disposable (losing it = reload, nothing precious).
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi

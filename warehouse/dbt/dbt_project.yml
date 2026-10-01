@@ -38,10 +38,11 @@ vars:
 #
 # Replication: table models set +engine ReplicatedMergeTree explicitly. dbt-clickhouse
 # 1.10.1 does NOT auto-convert MergeTree -> Replicated from the `cluster` profile
-# setting (validated in the P0 spike), so we must name the engine. Bare
-# ReplicatedMergeTree works because the operator configures
-# default_replica_path=/clickhouse/tables/{uuid}/{shard} on Atomic databases, giving
-# every table a unique keeper path. Views (staging/intermediate) have no engine.
+# setting (validated in the P0 spike), so we must name the engine. The engine stays
+# BARE (no zk path / replica name) — the nimbus_* databases are `Replicated` (see
+# profiles.yml `database_engine`), which both supplies the per-table path from the
+# table UUID and rejects explicit arguments outright. Views (staging/intermediate)
+# have no engine.
 models:
   nimbus:
     staging:

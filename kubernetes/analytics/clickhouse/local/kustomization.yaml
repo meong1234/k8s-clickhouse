@@ -5,6 +5,7 @@ resources:
   - ../base
   - clickhouse-credentials.yaml
   - dbt-credentials.yaml
+  - minio-credentials.yaml
 patches:
   - target:
       group: clickhouse.altinity.com

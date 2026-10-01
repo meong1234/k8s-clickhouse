@@ -84,12 +84,17 @@ ch-demo:
 		echo "  waiting for replicas to register ($${N:-0}/2)..."; sleep 2; \
 	done
 	@echo "==> [replica 0] Creating replicated table ON CLUSTER '$(CH_CLUSTER)'..."
+	@# `demo` uses the Replicated database engine (branch cas-local-s3, see
+	@# docs/cas-local-s3-plan.md Sec 5), which is why the table carries neither
+	@# ON CLUSTER nor explicit engine arguments: the database replicates its own DDL
+	@# and rejects both.
 	@kubectl -n $(CH_NAMESPACE) exec $(CH_POD_0) -- clickhouse-client -u $(CH_USER) --password $(CH_PASSWORD) -q "\
-		CREATE DATABASE IF NOT EXISTS demo ON CLUSTER '{cluster}';"
+		CREATE DATABASE IF NOT EXISTS demo ON CLUSTER '{cluster}'\
+		ENGINE = Replicated('/clickhouse/databases/{shard}/demo', '{shard}', '{replica}');"
 	@kubectl -n $(CH_NAMESPACE) exec $(CH_POD_0) -- clickhouse-client -u $(CH_USER) --password $(CH_PASSWORD) -q "\
-		CREATE TABLE IF NOT EXISTS demo.events ON CLUSTER '{cluster}' (\
+		CREATE TABLE IF NOT EXISTS demo.events (\
 			id UInt64, ts DateTime DEFAULT now(), msg String\
-		) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/demo/events', '{replica}')\
+		) ENGINE = ReplicatedMergeTree\
 		ORDER BY id;"
 	@echo "==> [replica 0] Inserting 5 rows..."
 	@kubectl -n $(CH_NAMESPACE) exec $(CH_POD_0) -- clickhouse-client -u $(CH_USER) --password $(CH_PASSWORD) -q "\

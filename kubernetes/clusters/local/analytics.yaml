@@ -35,7 +35,31 @@ spec:
   # reconcile/retry loop rather than blocking on a health check that can't resolve.
   wait: false
 ---
-# 2) ClickHouseInstallation (1 shard x 2 replicas). Depends on the Keeper quorum.
+# 2) In-cluster S3 (MinIO) backing the CAS disk. Sits between Keeper and the CHI
+#    because the CHI's CAS disk fails its boot-time capability probe if the bucket
+#    is not already there. Independent of Keeper (it only needs the operator layer
+#    for ordering), so it reconciles alongside keeper-chk.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: minio
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: clickhouse-operator-ks
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: analytics-source
+  path: ./minio/local
+  prune: true
+  # wait:true - unlike the Altinity CRs, a StatefulSet + Job are kstatus-native, so
+  # Flux can genuinely block here until MinIO is Ready and the bucket Job Completed.
+  wait: true
+---
+# 3) ClickHouseInstallation (1 shard x 2 replicas). Depends on the Keeper quorum.
 #    The CHI references the Keeper by name (spec.configuration.zookeeper.keeper);
 #    the operator discovers the keeper endpoints automatically and retries until
 #    they are reachable, so this converges even if Keeper is still starting.
@@ -47,6 +71,7 @@ metadata:
 spec:
   dependsOn:
     - name: keeper-chk
+    - name: minio
   interval: 10m
   retryInterval: 1m
   timeout: 5m
@@ -57,7 +82,7 @@ spec:
   prune: true
   wait: false
 ---
-# 3) dbt runtime (P3, v1 contract): the in-cluster dbt-runner / dbt-tester CronJobs that
+# 4) dbt runtime (P3, v1 contract): the in-cluster dbt-runner / dbt-tester CronJobs that
 #    run the Nimbus build/tests as Flux-managed Jobs. Depends on the CHI so the target
 #    warehouse (and the dbt-credentials Secret it reads) exist before the runner deploys.
 #    Manually driven via `make wh-build` / `make wh-test`; the CronJobs are suspended.

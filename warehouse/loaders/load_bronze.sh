@@ -70,9 +70,10 @@ load_chunk() { ch_i --input_format_parallel_parsing=0 $IBS -q "INSERT INTO nimbu
 native_batch() { sed "s/__OFFSET__/$2/g; s/__COUNT__/$3/g" "$1" \
                    | ch_i --max_threads=1 --max_block_size=262144 $IBS --multiquery; }
 
-truncate_one() { ch -q "TRUNCATE TABLE IF EXISTS nimbus_raw.$1 ON CLUSTER '{cluster}'" >/dev/null; }
+# No ON CLUSTER: nimbus_raw is a `Replicated` database and replicates the DDL itself.
+truncate_one() { ch -q "TRUNCATE TABLE IF EXISTS nimbus_raw.$1" >/dev/null; }
 
-echo "==> Truncating bronze tables ON CLUSTER..."
+echo "==> Truncating bronze tables..."
 for t in "${ALL_TABLES[@]}"; do retry "truncate $t" truncate_one "$t"; done
 purge
 
